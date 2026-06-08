@@ -14,11 +14,12 @@ type keyMap struct {
 	PgUp  key.Binding
 	PgDn  key.Binding
 	// Mutation bindings (Keys and Repos tabs).
-	Add    key.Binding
-	Delete key.Binding
-	Toggle key.Binding
-	Yes    key.Binding
-	No     key.Binding
+	Add     key.Binding
+	Delete  key.Binding
+	Toggle  key.Binding
+	Yes     key.Binding
+	No      key.Binding
+	Comment key.Binding // Issues sub-tab
 }
 
 var defaultKeyMap = keyMap{
@@ -34,9 +35,10 @@ var defaultKeyMap = keyMap{
 	PgUp: key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "page up")),
 	PgDn: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "page down")),
 	// Mutations.
-	Add:    key.NewBinding(key.WithKeys("a", "n"), key.WithHelp("a/n", "add/new")),
-	Delete: key.NewBinding(key.WithKeys("d", "x"), key.WithHelp("d/x", "delete")),
-	Toggle: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "toggle public")),
-	Yes:    key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yes")),
-	No:     key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "no")),
+	Add:     key.NewBinding(key.WithKeys("a", "n"), key.WithHelp("a/n", "add/new")),
+	Delete:  key.NewBinding(key.WithKeys("d", "x"), key.WithHelp("d/x", "delete")),
+	Toggle:  key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "toggle public")),
+	Yes:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yes")),
+	No:      key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "no")),
+	Comment: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comment")),
 }

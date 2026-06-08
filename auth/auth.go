@@ -78,6 +78,22 @@ func (h *Hooks) CanRead(user *store.User, ownerUsername, name string) bool {
 	return err == nil && r.Public
 }
 
+// CanWrite returns true if user may push to / create issues on the named repo:
+// admin, namespace owner, or an explicit repo_perms.write grant.
+func (h *Hooks) CanWrite(user *store.User, ownerUsername, name string) bool {
+	if user == nil {
+		return false
+	}
+	if user.IsAdmin || user.Username == ownerUsername {
+		return true
+	}
+	r, err := h.st.GetRepo(ownerUsername, name)
+	if err != nil {
+		return false
+	}
+	return h.st.HasWriteAccess(user.ID, r.ID)
+}
+
 // CanWriteInNamespace returns true if user may create, delete, or modify repos
 // in ownerUsername's namespace. Admins pass for every namespace.
 // WARNING: intentionally permissive so M7 admin panes can reuse it.

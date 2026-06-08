@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/ssh"
 
 	"github.com/iceice666/kohiro/auth"
+	"github.com/iceice666/kohiro/issues"
 	"github.com/iceice666/kohiro/store"
 )
 
@@ -22,9 +23,10 @@ const (
 var rootTabNames = []string{"Repos", "Keys"}
 
 type rootModel struct {
-	st    *store.Store
-	hooks *auth.Hooks
-	user  *store.User
+	st          *store.Store
+	hooks       *auth.Hooks
+	user        *store.User
+	issueClient *issues.Client
 
 	width, height int
 	active        rootTab
@@ -34,7 +36,7 @@ type rootModel struct {
 	keys  keysModel
 }
 
-func NewRoot(st *store.Store, hooks *auth.Hooks, user *store.User, sess ssh.Session) *rootModel {
+func NewRoot(st *store.Store, hooks *auth.Hooks, user *store.User, issueClient *issues.Client, sess ssh.Session) *rootModel {
 	pty, _, _ := sess.Pty()
 	w, h := pty.Window.Width, pty.Window.Height
 	if w == 0 {
@@ -45,13 +47,14 @@ func NewRoot(st *store.Store, hooks *auth.Hooks, user *store.User, sess ssh.Sess
 	}
 	contentH := h - 3 // header+tabs + separator + slack
 	return &rootModel{
-		st:     st,
-		hooks:  hooks,
-		user:   user,
-		width:  w,
-		height: h,
-		repos:  newReposModel(st, hooks, user, w, contentH),
-		keys:   newKeysModel(st, hooks, user, w, contentH),
+		st:          st,
+		hooks:       hooks,
+		user:        user,
+		issueClient: issueClient,
+		width:       w,
+		height:      h,
+		repos:       newReposModel(st, hooks, user, w, contentH),
+		keys:        newKeysModel(st, hooks, user, w, contentH),
 	}
 }
 
@@ -93,7 +96,9 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openRepoMsg:
 		if m.hooks.CanRead(m.user, msg.owner, msg.name) {
-			detail, cmd := newRepoDetail(msg.owner, msg.name, m.width, m.height)
+			detail, cmd := newRepoDetail(msg.owner, msg.name,
+				m.st, m.hooks, m.user, m.issueClient,
+				m.width, m.height)
 			m.detail = &detail
 			return m, cmd
 		}

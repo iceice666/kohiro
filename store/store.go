@@ -78,6 +78,12 @@ func (s *Store) migrate() error {
 			write   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(repo_id, user_id)
 		);
+		CREATE TABLE IF NOT EXISTS git_bug_identities (
+			user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			repo_id    INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+			git_bug_id TEXT    NOT NULL,
+			PRIMARY KEY (user_id, repo_id)
+		);
 	`)
 	return err
 }
@@ -386,6 +392,33 @@ func (s *Store) DeleteRepo(ownerUsername, name string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// GetGitBugIdentity returns the cached git-bug USER_ID for the given (userID, repoID) pair.
+// Returns ErrNotFound if no identity has been created yet.
+func (s *Store) GetGitBugIdentity(userID, repoID int64) (string, error) {
+	var id string
+	err := s.db.QueryRow(
+		`SELECT git_bug_id FROM git_bug_identities WHERE user_id = ? AND repo_id = ?`,
+		userID, repoID,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// PutGitBugIdentity stores (or overwrites) the git-bug USER_ID for the given
+// (userID, repoID) pair.
+func (s *Store) PutGitBugIdentity(userID, repoID int64, gitBugID string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO git_bug_identities(user_id, repo_id, git_bug_id) VALUES (?, ?, ?)`,
+		userID, repoID, gitBugID,
+	)
+	return err
 }
 
 // Bootstrap creates the admin user and registers their key if the user doesn't exist yet.

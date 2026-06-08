@@ -12,7 +12,10 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/iceice666/kohiro/auth"
 	kohirogit "github.com/iceice666/kohiro/git"
+	"github.com/iceice666/kohiro/issues"
+	"github.com/iceice666/kohiro/store"
 )
 
 type detailTab int
@@ -20,6 +23,7 @@ type detailTab int
 const (
 	detailFiles   detailTab = iota
 	detailCommits detailTab = iota
+	detailIssues  detailTab = iota
 )
 
 type fileEntry struct {
@@ -80,10 +84,17 @@ type repoDetailModel struct {
 
 	commits list.Model
 
+	issues issuesModel
+
 	errMsg string
 }
 
-func newRepoDetail(owner, name string, width, height int) (repoDetailModel, tea.Cmd) {
+func newRepoDetail(
+	owner, name string,
+	st *store.Store, hooks *auth.Hooks, user *store.User,
+	client *issues.Client,
+	width, height int,
+) (repoDetailModel, tea.Cmd) {
 	contentH := height - 3 // room for tab bar + breadcrumb + footer
 
 	fl := list.New(nil, newStyledDelegate(), width, contentH)
@@ -96,16 +107,19 @@ func newRepoDetail(owner, name string, width, height int) (repoDetailModel, tea.
 
 	vp := viewport.New(width, contentH)
 
+	issuesView := newIssuesView(owner, name, st, hooks, user, client, width, contentH)
+
 	m := repoDetailModel{
-		owner:  owner,
-		name:   name,
-		files:  fl,
+		owner:   owner,
+		name:    name,
+		files:   fl,
 		commits: cl,
-		blobVP: vp,
-		width:  width,
-		height: height,
+		blobVP:  vp,
+		issues:  issuesView,
+		width:   width,
+		height:  height,
 	}
-	return m, tea.Batch(m.loadTreeCmd(""), m.loadCommitsCmd())
+	return m, tea.Batch(m.loadTreeCmd(""), m.loadCommitsCmd(), m.issues.Init())
 }
 
 func (m repoDetailModel) loadTreeCmd(dirPath string) tea.Cmd {
@@ -224,6 +238,11 @@ func (m repoDetailModel) Update(msg tea.Msg) (repoDetailModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case issuesLoadedMsg, issueDetailLoadedMsg, issueCreatedMsg, issueCommentedMsg, issueClosedMsg:
+		var cmd tea.Cmd
+		m.issues, cmd = m.issues.Update(msg)
+		return m, cmd
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -234,25 +253,27 @@ func (m repoDetailModel) Update(msg tea.Msg) (repoDetailModel, tea.Cmd) {
 		m.blobVP, cmd = m.blobVP.Update(msg)
 		return m, cmd
 	}
-	if m.activeSub == detailFiles {
+	switch m.activeSub {
+	case detailFiles:
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg)
 		return m, cmd
+	case detailIssues:
+		var cmd tea.Cmd
+		m.issues, cmd = m.issues.Update(msg)
+		return m, cmd
+	default:
+		var cmd tea.Cmd
+		m.commits, cmd = m.commits.Update(msg)
+		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.commits, cmd = m.commits.Update(msg)
-	return m, cmd
 }
 
 func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 	switch {
 	case key.Matches(msg, defaultKeyMap.Tab):
-		if !m.blobOpen {
-			if m.activeSub == detailFiles {
-				m.activeSub = detailCommits
-			} else {
-				m.activeSub = detailFiles
-			}
+		if !m.blobOpen && !m.issues.IsModal() {
+			m.activeSub = (m.activeSub + 1) % 3
 		}
 		return m, nil
 
@@ -261,7 +282,14 @@ func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 			m.blobOpen = false
 			return m, nil
 		}
-		if m.currentPath != "" {
+		// Delegate Esc to issues when it is active and not in its top-level list
+		// (issues handles its own detail→list and modal→X navigation).
+		if m.activeSub == detailIssues && m.issues.mode != issuesModeList {
+			var cmd tea.Cmd
+			m.issues, cmd = m.issues.Update(msg)
+			return m, cmd
+		}
+		if m.currentPath != "" && m.activeSub == detailFiles {
 			m.currentPath = path.Dir(m.currentPath)
 			if m.currentPath == "." {
 				m.currentPath = ""
@@ -293,36 +321,55 @@ func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 		m.blobVP, cmd = m.blobVP.Update(msg)
 		return m, cmd
 	}
-	if m.activeSub == detailFiles {
+	switch m.activeSub {
+	case detailFiles:
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg)
 		return m, cmd
+	case detailIssues:
+		var cmd tea.Cmd
+		m.issues, cmd = m.issues.Update(msg)
+		return m, cmd
+	default:
+		var cmd tea.Cmd
+		m.commits, cmd = m.commits.Update(msg)
+		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.commits, cmd = m.commits.Update(msg)
-	return m, cmd
 }
 
 func (m repoDetailModel) View() string {
+	// When issues is in modal mode, render it full-screen (it manages its own layout).
+	if m.activeSub == detailIssues && m.issues.IsModal() {
+		return m.issues.View()
+	}
+
 	var sb strings.Builder
 
 	// Tab bar.
-	filesTab := styleTabInactive.Render("Files")
-	commitsTab := styleTabInactive.Render("Commits")
-	if m.activeSub == detailFiles {
-		filesTab = styleTabActive.Render("Files")
-	} else {
-		commitsTab = styleTabActive.Render("Commits")
+	renderTab := func(label string, tab detailTab) string {
+		if m.activeSub == tab {
+			return styleTabActive.Render(label)
+		}
+		return styleTabInactive.Render(label)
 	}
+
 	breadcrumb := styleBreadcrumb.Render(m.owner + "/" + m.name)
-	if m.currentPath != "" {
+	if m.currentPath != "" && m.activeSub == detailFiles {
 		breadcrumb += styleBreadcrumbSep.Render(" › ") + styleBreadcrumb.Render(m.currentPath)
 	}
-	sb.WriteString(breadcrumb + "  " + filesTab + "  " + commitsTab + "\n")
+	sb.WriteString(breadcrumb + "  " +
+		renderTab("Files", detailFiles) + "  " +
+		renderTab("Commits", detailCommits) + "  " +
+		renderTab("Issues", detailIssues) + "\n")
 	sb.WriteString(styleSeparator.Render(strings.Repeat("─", m.width)) + "\n")
 
 	if m.errMsg != "" {
 		sb.WriteString(styleError.Render("Error: " + m.errMsg))
+		return sb.String()
+	}
+
+	if m.activeSub == detailIssues {
+		sb.WriteString(m.issues.View())
 		return sb.String()
 	}
 
@@ -349,6 +396,7 @@ func (m *repoDetailModel) setSize(w, h int) {
 	m.commits.SetSize(w, contentH)
 	m.blobVP.Width = w
 	m.blobVP.Height = contentH
+	m.issues.setSize(w, contentH)
 }
 
 type popDetailMsg struct{}

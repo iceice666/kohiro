@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"path/filepath"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -16,7 +15,7 @@ var ErrTooLarge = errors.New("blob too large")
 const blobHardCap = 1 << 20 // 1 MiB
 
 func OpenRepo(owner, name string) (*gogit.Repository, error) {
-	return gogit.PlainOpen(filepath.Join(RepoDir, owner, name+".git"))
+	return gogit.PlainOpen(RepoPath(owner, name))
 }
 
 // CommitLog returns up to n commits starting from HEAD, newest first.

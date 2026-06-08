@@ -8,10 +8,12 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/iceice666/kohiro/auth"
+	"github.com/iceice666/kohiro/issues"
 	"github.com/iceice666/kohiro/store"
 )
 
 func Middleware(st *store.Store, hooks *auth.Hooks) wish.Middleware {
+	client := &issues.Client{Binary: "git-bug"}
 	handler := func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
 		if _, _, isPty := sess.Pty(); !isPty {
 			if len(sess.Command()) == 0 {
@@ -20,7 +22,7 @@ func Middleware(st *store.Store, hooks *auth.Hooks) wish.Middleware {
 			return nil, nil
 		}
 		user := hooks.UserFromSession(sess)
-		return NewRoot(st, hooks, user, sess), bubbletea.MakeOptions(sess)
+		return NewRoot(st, hooks, user, client, sess), bubbletea.MakeOptions(sess)
 	}
 	return bubbletea.MiddlewareWithColorProfile(handler, termenv.ANSI256)
 }

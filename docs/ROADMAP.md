@@ -62,12 +62,12 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
-## Milestone 6 — Issues (git-bug)
+## Milestone 6 — Issues (git-bug) ✅
 > Issues are stored inside the repo's git objects; visible and manageable from the TUI.
 
-- [ ] Shell out to `git-bug` binary for read (list, show)
-- [ ] TUI view: issue list, issue detail
-- [ ] TUI action: create issue, add comment, close
+- [x] Shell out to `git-bug` binary for read (list, show)
+- [x] TUI view: issue list, issue detail
+- [x] TUI action: create issue, add comment, close
 
 ---
 
