@@ -34,6 +34,42 @@ ssh -T -p 2222 user@localhost                          # no-PTY hint
 git clone ssh://user@localhost:2222/owner/repo.git     # clone
 ```
 
+## Issue tracking (git-bug)
+
+Issues live in git-bug refs inside this repo and mirror to github.com/iceice666/kohiro
+via a configured bridge named `default`.
+
+```sh
+git-bug bug                           # list open bugs
+git-bug bug show <id>                 # show one bug + comments
+git-bug bug new --title="..." \
+  --message="..." --non-interactive   # file a new issue
+git-bug bug comment new <id> -m "..."
+git-bug bug status close <id>
+
+git-bug bridge pull default           # import new/updated GitHub issues
+git-bug bridge push default           # push local changes upstream
+git-bug push                          # publish refs/bugs/* + refs/identities/* to origin
+git-bug pull                          # fetch bug refs from origin
+```
+
+`origin`'s fetch refspec includes `refs/bugs/*` and `refs/identities/*`, so a plain
+`git fetch origin` keeps bug data in sync along with branches.
+
+**First-time setup** (one-off; already done for the primary identity):
+```sh
+# 1. Create your identity (once per repo clone)
+git-bug user new --non-interactive --name "Your Name" --email "you@example.com"
+
+# 2. Configure the GitHub bridge (requires a PAT with `public_repo` scope)
+git-bug bridge new --name=default --target=github \
+  --owner=iceice666 --project=kohiro --token-stdin --non-interactive
+
+# 3. Initial import and publish
+git-bug bridge pull default
+git-bug push origin
+```
+
 ## Architecture
 
 ### Middleware chain (`cmd/kohiro/main.go`)
