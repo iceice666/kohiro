@@ -31,7 +31,7 @@ type repoItem struct {
 	public      bool
 }
 
-func (r repoItem) Title() string       { return r.owner + "/" + r.name }
+func (r repoItem) Title() string { return r.owner + "/" + r.name }
 func (r repoItem) Description() string {
 	if r.public {
 		return styleTagPublic.Render("● public")
@@ -55,8 +55,8 @@ type reposLoadedMsg struct {
 type openRepoMsg struct{ owner, name string }
 
 type createRepoResultMsg struct {
-	err    error
-	name   string
+	err     error
+	name    string
 	existed bool
 }
 

@@ -72,8 +72,8 @@ type detailBlobLoadedMsg struct {
 }
 
 type repoDetailModel struct {
-	owner, name string
-	activeSub   detailTab
+	owner, name   string
+	activeSub     detailTab
 	width, height int
 
 	currentPath string

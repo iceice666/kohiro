@@ -56,13 +56,13 @@ type keysModel struct {
 
 	width, height int
 
-	mode             keysMode
-	prompt           inputModel
-	confirm          confirmModel
-	pendingDeleteID  int64
-	pendingDeleteFP  string
-	toast            string
-	toastErr         bool
+	mode            keysMode
+	prompt          inputModel
+	confirm         confirmModel
+	pendingDeleteID int64
+	pendingDeleteFP string
+	toast           string
+	toastErr        bool
 }
 
 func newKeysModel(st *store.Store, hooks *auth.Hooks, user *store.User, width, height int) keysModel {

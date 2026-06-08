@@ -374,4 +374,3 @@ func TestDeleteRepo_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
-

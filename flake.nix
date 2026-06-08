@@ -19,6 +19,7 @@
             gotools      # goimports, etc.
             git
             git-bug
+            just
             sqlite       # debug queries against kohiro.db
           ];
 

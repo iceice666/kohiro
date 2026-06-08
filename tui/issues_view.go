@@ -89,12 +89,12 @@ type issuesModel struct {
 	user        *store.User
 	client      *issues.Client
 
-	mode          issuesMode
-	list          list.Model
-	detailVP      viewport.Model
-	selectedID    string
-	selectedHuman string
-	selectedTitle string
+	mode           issuesMode
+	list           list.Model
+	detailVP       viewport.Model
+	selectedID     string
+	selectedHuman  string
+	selectedTitle  string
 	selectedStatus string
 
 	newForm      textareaModel

@@ -70,23 +70,23 @@ type identity struct {
 
 // listBug is the JSON shape returned by `git-bug bug --format=json` list items.
 type listBug struct {
-	ID         string  `json:"id"`
-	HumanID    string  `json:"human_id"`
-	Status     string  `json:"status"`
-	Title      string  `json:"title"`
+	ID         string   `json:"id"`
+	HumanID    string   `json:"human_id"`
+	Status     string   `json:"status"`
+	Title      string   `json:"title"`
 	Author     identity `json:"author"`
-	CreateTime bugTime `json:"create_time"`
-	Comments   int     `json:"comments"`
+	CreateTime bugTime  `json:"create_time"`
+	Comments   int      `json:"comments"`
 }
 
 // showBug is the JSON shape returned by `git-bug bug show --format=json`.
 type showBug struct {
-	ID         string      `json:"id"`
-	HumanID    string      `json:"human_id"`
-	Status     string      `json:"status"`
-	Title      string      `json:"title"`
-	Author     identity    `json:"author"`
-	CreateTime bugTime     `json:"create_time"`
+	ID         string        `json:"id"`
+	HumanID    string        `json:"human_id"`
+	Status     string        `json:"status"`
+	Title      string        `json:"title"`
+	Author     identity      `json:"author"`
+	CreateTime bugTime       `json:"create_time"`
 	Comments   []showComment `json:"comments"`
 }
 
