@@ -38,12 +38,12 @@ Each milestone is independently verifiable before moving on.
 ## Milestone 4 — TUI
 > Bare `ssh -p 2222 user@localhost` opens an interactive terminal UI.
 
-- [ ] `wish/bubbletea` middleware; dispatch: PTY → TUI, command → passthrough
-- [ ] View: repo list (own + public)
-- [ ] View: file browser (tree + blob via `go-git` read-only)
-- [ ] View: commit log
-- [ ] View: SSH key management (list, add, remove own keys)
-- [ ] View: repo management (create, delete, toggle public/private)
+- [x] `wish/bubbletea` middleware; dispatch: PTY → TUI, command → passthrough
+- [x] View: repo list (own + public)
+- [x] View: file browser (tree + blob via `go-git` read-only)
+- [x] View: commit log
+- [x] View: SSH key management (list, add, remove own keys)
+- [x] View: repo management (create, delete, toggle public/private)
 
 ---
 

@@ -29,7 +29,8 @@ goimports -w .               # format + fix imports
 Test the running server:
 
 ```sh
-ssh -p 2222 user@localhost                              # greeting
+ssh -p 2222 user@localhost                              # opens TUI
+ssh -T -p 2222 user@localhost                          # no-PTY hint
 git clone ssh://user@localhost:2222/owner/repo.git     # clone
 ```
 
@@ -40,24 +41,25 @@ git clone ssh://user@localhost:2222/owner/repo.git     # clone
 `wish.NewServer` composes middleware in **reverse** order — the last listed runs first:
 
 ```
-greetMiddleware  →  wishgit.Middleware  →  logging.Middleware
+tui.Middleware  →  wishgit.Middleware  →  logging.Middleware
 ```
 
-- **greetMiddleware** — prints a greeting, then calls `next`.
+- **tui.Middleware** — if the session has a PTY, launches the Bubble Tea TUI. Otherwise calls `next` so git ops fall through. Non-PTY sessions with no command receive a one-liner hint.
 - **wishgit.Middleware** — handles `git-upload-pack` / `git-receive-pack` commands, serving repos from `./data/repos/`.
 - **logging.Middleware** — logs every SSH session.
 
-The `allowAllHooks` struct satisfies `wishgit.Hooks`; it grants `ReadWriteAccess` to every key and stubs `Push`/`Fetch`. Milestone 3 replaces this with a real auth lookup.
+`hooks := auth.New(st)` is the `wishgit.Hooks` implementation. It enforces per-repo access: admin/owner/explicit-grant → read-write; public repo → read-only; else no access.
 
 ### Repo layout
 
 Bare repos live at `data/repos/<owner>/<name>.git`. `git.Init(owner, name)` creates one via `wishgit.EnsureRepo`. Host keys are stored in `data/.ssh/`.
 
-### Planned packages (not yet created)
+### Packages
 
-Per the roadmap:
-- `store/store.go` — SQLite (users, ssh_keys, repos, repo_perms, ci_runs)
-- `auth/auth.go` — SSH fingerprint → user lookup, feeds into the wish public-key handler
-- `ci/queue.go` — SQLite-backed job queue; receives notifications from `post-receive`
-- `ci/runner.go` — `Runner` interface; `ShellRunner` execs `.ci/<event>` inside a container (podman/docker)
-- TUI views wired via `wish/bubbletea` middleware (dispatches PTY sessions to Bubble Tea)
+- `store/store.go` — SQLite (users, ssh_keys, repos, repo_perms)
+- `auth/auth.go` — SSH fingerprint → user lookup; `Hooks.AuthRepo` enforces access; `Hooks.UserFromSession` resolves the TUI user; `Hooks.CanRead` is shared by TUI and git path
+- `git/repo.go` — `RepoDir`, `Init`
+- `git/read.go` — `OpenRepo`, `CommitLog`, `HeadTree`, `TreeAt`, `Blob`, `IsBinary` via go-git
+- `tui/` — Bubble Tea TUI (Repos tab, Keys tab, file browser, commit log); entry via `tui.Middleware`
+- `ci/queue.go` — (planned M5) SQLite-backed job queue
+- `ci/runner.go` — (planned M5) `Runner` interface; `ShellRunner` execs `.ci/<event>` inside a container
