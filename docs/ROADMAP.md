@@ -13,13 +13,13 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
-## Milestone 2 — Git Server
+## Milestone 2 — Git Server ✅
 > `git clone ssh://user@localhost:2222/owner/repo.git` works.
 
-- [ ] `wish/git` middleware wired to `data/repos/`
-- [ ] `git/repo.go`: `Init(owner, name string)` — creates bare repo at `data/repos/<owner>/<name>.git`
-- [ ] Stub access hook (allow all for now)
-- [ ] `post-receive` hook stub (trigger point for CI, no-op for now)
+- [x] `wish/git` middleware wired to `data/repos/`
+- [x] `git/repo.go`: `Init(owner, name string)` — creates bare repo at `data/repos/<owner>/<name>.git`
+- [x] Stub access hook (allow all for now)
+- [x] `post-receive` hook stub (trigger point for CI, no-op for now)
 
 ---
 
