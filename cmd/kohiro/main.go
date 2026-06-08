@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -18,6 +17,7 @@ import (
 	"github.com/iceice666/kohiro/auth"
 	kohirogit "github.com/iceice666/kohiro/git"
 	"github.com/iceice666/kohiro/store"
+	"github.com/iceice666/kohiro/tui"
 )
 
 const (
@@ -85,7 +85,7 @@ func main() {
 			return true
 		}),
 		wish.WithMiddleware(
-			greetMiddleware,
+			tui.Middleware(st, hooks),
 			wishgit.Middleware(kohirogit.RepoDir, hooks),
 			logging.Middleware(),
 		),
@@ -106,13 +106,6 @@ func main() {
 
 	<-sig
 	_ = s.Close()
-}
-
-func greetMiddleware(next ssh.Handler) ssh.Handler {
-	return func(sess ssh.Session) {
-		fmt.Fprintf(sess, "hello, %s — kohiro is alive\n", sess.User())
-		next(sess)
-	}
 }
 
 func splitOwnerName(s string) (owner, name string, ok bool) {
