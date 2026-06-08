@@ -23,14 +23,15 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
-## Milestone 3 — Auth & Multi-user
+## Milestone 3 — Auth & Multi-user ✅
 > Only keys in the DB can push; unknown keys get read-only on public repos.
 
-- [ ] SQLite store (`store/store.go`): open, migrate
-- [ ] Schema: `users`, `ssh_keys`, `repos`, `repo_perms`
-- [ ] Bootstrap: first admin key from `--admin-key` flag
-- [ ] `auth/auth.go`: fingerprint → user lookup, wire into wish public key handler
-- [ ] Access hook: owner/write → push allowed; public repo → fetch allowed; else deny
+- [x] SQLite store (`store/store.go`): open, migrate
+- [x] Schema: `users`, `ssh_keys`, `repos`, `repo_perms`
+- [x] Bootstrap: first admin key from `--admin-key` flag (with optional `--admin-user`, default "admin")
+- [x] `auth/auth.go`: fingerprint → user lookup, wire into wish public key handler
+- [x] Access hook: owner/write → push allowed; public repo → fetch allowed; else deny
+- [x] `--set-public owner/name` / `--set-private owner/name` flags to toggle repo visibility
 
 ---
 
