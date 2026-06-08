@@ -1,0 +1,4 @@
+data/
+.gopath/
+/kohiro
+/.direnv
