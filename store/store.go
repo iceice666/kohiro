@@ -9,7 +9,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound          = errors.New("not found")
+	ErrKeyClaimedByOther = errors.New("key already registered to another user")
+	ErrLastKey           = errors.New("cannot remove the last key")
+)
 
 type Store struct {
 	db *sql.DB
@@ -202,12 +206,186 @@ func (s *Store) SetPublic(ownerUsername, name string, public bool) error {
 	return nil
 }
 
+func (s *Store) GrantWrite(userID, repoID int64) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO repo_perms(repo_id, user_id, write) VALUES (?, ?, 1)`,
+		repoID, userID,
+	)
+	return err
+}
+
 func (s *Store) HasWriteAccess(userID, repoID int64) bool {
 	var w int
 	_ = s.db.QueryRow(
 		`SELECT write FROM repo_perms WHERE repo_id = ? AND user_id = ?`, repoID, userID,
 	).Scan(&w)
 	return w != 0
+}
+
+type RepoListing struct {
+	Repo
+	OwnerUsername string
+}
+
+func (s *Store) ListReposForUser(userID int64) ([]RepoListing, error) {
+	rows, err := s.db.Query(`
+		SELECT r.id, r.owner_id, r.name, r.public, u.username
+		FROM repos r
+		JOIN users u ON u.id = r.owner_id
+		WHERE r.public = 1
+		   OR r.owner_id = ?
+		   OR EXISTS (SELECT 1 FROM repo_perms p WHERE p.repo_id = r.id AND p.user_id = ?)
+		   OR (SELECT is_admin FROM users WHERE id = ?) = 1
+		ORDER BY u.username, r.name
+	`, userID, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRepoListings(rows)
+}
+
+func (s *Store) ListPublicRepos() ([]RepoListing, error) {
+	rows, err := s.db.Query(`
+		SELECT r.id, r.owner_id, r.name, r.public, u.username
+		FROM repos r
+		JOIN users u ON u.id = r.owner_id
+		WHERE r.public = 1
+		ORDER BY u.username, r.name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRepoListings(rows)
+}
+
+func scanRepoListings(rows *sql.Rows) ([]RepoListing, error) {
+	var listings []RepoListing
+	for rows.Next() {
+		var l RepoListing
+		var isPub int
+		if err := rows.Scan(&l.ID, &l.OwnerID, &l.Name, &isPub, &l.OwnerUsername); err != nil {
+			return nil, err
+		}
+		l.Public = isPub != 0
+		listings = append(listings, l)
+	}
+	if listings == nil {
+		listings = []RepoListing{}
+	}
+	return listings, rows.Err()
+}
+
+type SSHKey struct {
+	ID          int64
+	Fingerprint string
+	Comment     string
+}
+
+func (s *Store) ListKeysForUser(userID int64) ([]SSHKey, error) {
+	rows, err := s.db.Query(
+		`SELECT id, fingerprint, comment FROM ssh_keys WHERE user_id = ? ORDER BY id`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []SSHKey
+	for rows.Next() {
+		var k SSHKey
+		if err := rows.Scan(&k.ID, &k.Fingerprint, &k.Comment); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	if keys == nil {
+		keys = []SSHKey{}
+	}
+	return keys, rows.Err()
+}
+
+// AddKeyStrict is the TUI add-path. Pre-checks the fingerprint uniqueness:
+//   - same user already has it → (true, nil), no insert
+//   - another user has it      → (false, ErrKeyClaimedByOther)
+//   - free                     → INSERT, (false, nil or db err)
+//
+// The existing AddKey (INSERT OR IGNORE) is kept for Bootstrap which intentionally no-ops.
+func (s *Store) AddKeyStrict(userID int64, fingerprint, comment string) (bool, error) {
+	var existingUser int64
+	err := s.db.QueryRow(
+		`SELECT user_id FROM ssh_keys WHERE fingerprint = ?`, fingerprint,
+	).Scan(&existingUser)
+	if err == nil {
+		if existingUser == userID {
+			return true, nil
+		}
+		return false, ErrKeyClaimedByOther
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO ssh_keys(user_id, fingerprint, comment) VALUES (?, ?, ?)`,
+		userID, fingerprint, comment,
+	)
+	return false, err
+}
+
+// KeyCount returns the number of SSH keys registered to userID.
+func (s *Store) KeyCount(userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM ssh_keys WHERE user_id = ?`, userID,
+	).Scan(&n)
+	return n, err
+}
+
+// RemoveKey deletes the key if and only if it belongs to userID. Returns ErrNotFound
+// if no row matched (wrong id or wrong owner).
+func (s *Store) RemoveKey(userID, keyID int64) error {
+	res, err := s.db.Exec(
+		`DELETE FROM ssh_keys WHERE id = ? AND user_id = ?`, keyID, userID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteRepo removes the repo and its permission rows in a transaction.
+// Returns ErrNotFound when no repo matches ownerUsername/name.
+func (s *Store) DeleteRepo(ownerUsername, name string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var repoID int64
+	err = tx.QueryRow(`
+		SELECT r.id FROM repos r
+		JOIN users u ON u.id = r.owner_id
+		WHERE u.username = ? AND r.name = ?`, ownerUsername, name,
+	).Scan(&repoID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM repo_perms WHERE repo_id = ?`, repoID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, repoID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Bootstrap creates the admin user and registers their key if the user doesn't exist yet.
