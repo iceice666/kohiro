@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -84,6 +85,21 @@ func (s *Store) migrate() error {
 			git_bug_id TEXT    NOT NULL,
 			PRIMARY KEY (user_id, repo_id)
 		);
+		CREATE TABLE IF NOT EXISTS ci_runs (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+			sha         TEXT    NOT NULL,
+			ref         TEXT    NOT NULL,
+			event       TEXT    NOT NULL,
+			status      TEXT    NOT NULL,
+			exit_code   INTEGER,
+			image       TEXT    NOT NULL DEFAULT '',
+			queued_at   TEXT    NOT NULL,
+			started_at  TEXT,
+			finished_at TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_repo_id ON ci_runs(repo_id, id DESC);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_status  ON ci_runs(status);
 	`)
 	return err
 }
@@ -174,6 +190,25 @@ func (s *Store) GetRepo(ownerUsername, name string) (*Repo, error) {
 	}
 	r.Public = isPub != 0
 	return &r, nil
+}
+
+// GetRepoByID returns the repo and its owner's username by repo ID.
+func (s *Store) GetRepoByID(id int64) (RepoListing, error) {
+	var l RepoListing
+	var isPub int
+	err := s.db.QueryRow(`
+		SELECT r.id, r.owner_id, r.name, r.public, u.username
+		FROM repos r JOIN users u ON u.id = r.owner_id
+		WHERE r.id = ?
+	`, id).Scan(&l.ID, &l.OwnerID, &l.Name, &isPub, &l.OwnerUsername)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RepoListing{}, ErrNotFound
+	}
+	if err != nil {
+		return RepoListing{}, err
+	}
+	l.Public = isPub != 0
+	return l, nil
 }
 
 func (s *Store) repoByOwnerAndName(ownerID int64, name string) (*Repo, error) {
@@ -419,6 +454,198 @@ func (s *Store) PutGitBugIdentity(userID, repoID int64, gitBugID string) error {
 		userID, repoID, gitBugID,
 	)
 	return err
+}
+
+// CIRun represents one CI job record.
+type CIRun struct {
+	ID         int64
+	RepoID     int64
+	SHA        string
+	Ref        string
+	Event      string
+	Status     string
+	ExitCode   *int
+	Image      string
+	QueuedAt   time.Time
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+}
+
+// EnqueueRun inserts a new ci_runs row with status 'queued'.
+func (s *Store) EnqueueRun(repoID int64, sha, ref, event, image string) (CIRun, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Exec(
+		`INSERT INTO ci_runs(repo_id, sha, ref, event, status, image, queued_at)
+		 VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
+		repoID, sha, ref, event, image, now,
+	)
+	if err != nil {
+		return CIRun{}, err
+	}
+	id, _ := res.LastInsertId()
+	queuedAt, _ := time.Parse(time.RFC3339, now)
+	return CIRun{
+		ID: id, RepoID: repoID, SHA: sha, Ref: ref, Event: event,
+		Status: "queued", Image: image, QueuedAt: queuedAt,
+	}, nil
+}
+
+// ClaimNextRun atomically picks the oldest queued run and marks it 'running'.
+// Returns (run, true, nil) on success, (zero, false, nil) when the queue is empty.
+func (s *Store) ClaimNextRun() (CIRun, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return CIRun{}, false, err
+	}
+	defer tx.Rollback()
+
+	var run CIRun
+	var exitCode sql.NullInt64
+	var startedAt, finishedAt sql.NullString
+	var queuedAtStr string
+	err = tx.QueryRow(`
+		SELECT id, repo_id, sha, ref, event, status, exit_code, image, queued_at, started_at, finished_at
+		FROM ci_runs WHERE status = 'queued' ORDER BY id LIMIT 1
+	`).Scan(
+		&run.ID, &run.RepoID, &run.SHA, &run.Ref, &run.Event, &run.Status,
+		&exitCode, &run.Image, &queuedAtStr, &startedAt, &finishedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CIRun{}, false, nil
+	}
+	if err != nil {
+		return CIRun{}, false, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(
+		`UPDATE ci_runs SET status = 'running', started_at = ? WHERE id = ?`, now, run.ID,
+	); err != nil {
+		return CIRun{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CIRun{}, false, err
+	}
+
+	run.Status = "running"
+	run.QueuedAt, _ = time.Parse(time.RFC3339, queuedAtStr)
+	t := time.Now().UTC()
+	run.StartedAt = &t
+	if exitCode.Valid {
+		n := int(exitCode.Int64)
+		run.ExitCode = &n
+	}
+	return run, true, nil
+}
+
+// MarkRunStarted updates started_at for a run already claimed (used when the
+// caller needs to record start time separately from claiming).
+func (s *Store) MarkRunStarted(id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(`UPDATE ci_runs SET started_at = ? WHERE id = ?`, now, id)
+	return err
+}
+
+// MarkRunFinished updates status, exit_code, and finished_at.
+func (s *Store) MarkRunFinished(id int64, status string, exitCode int) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`UPDATE ci_runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?`,
+		status, exitCode, now, id,
+	)
+	return err
+}
+
+// ListRunsForRepo returns the most recent limit runs for the given repo, newest first.
+func (s *Store) ListRunsForRepo(repoID int64, limit int) ([]CIRun, error) {
+	rows, err := s.db.Query(`
+		SELECT id, repo_id, sha, ref, event, status, exit_code, image, queued_at, started_at, finished_at
+		FROM ci_runs WHERE repo_id = ? ORDER BY id DESC LIMIT ?
+	`, repoID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCIRuns(rows)
+}
+
+// GetRun returns a single CIRun by ID. Returns ErrNotFound when absent.
+func (s *Store) GetRun(id int64) (CIRun, error) {
+	var run CIRun
+	var exitCode sql.NullInt64
+	var startedAt, finishedAt sql.NullString
+	var queuedAtStr string
+	err := s.db.QueryRow(`
+		SELECT id, repo_id, sha, ref, event, status, exit_code, image, queued_at, started_at, finished_at
+		FROM ci_runs WHERE id = ?
+	`, id).Scan(
+		&run.ID, &run.RepoID, &run.SHA, &run.Ref, &run.Event, &run.Status,
+		&exitCode, &run.Image, &queuedAtStr, &startedAt, &finishedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CIRun{}, ErrNotFound
+	}
+	if err != nil {
+		return CIRun{}, err
+	}
+	run.QueuedAt, _ = time.Parse(time.RFC3339, queuedAtStr)
+	if exitCode.Valid {
+		n := int(exitCode.Int64)
+		run.ExitCode = &n
+	}
+	if startedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, startedAt.String)
+		run.StartedAt = &t
+	}
+	if finishedAt.Valid {
+		t, _ := time.Parse(time.RFC3339, finishedAt.String)
+		run.FinishedAt = &t
+	}
+	return run, nil
+}
+
+// RecoverStaleRuns marks any 'running' rows as 'error' (left over from a crash).
+// Returns the number of rows updated.
+func (s *Store) RecoverStaleRuns() (int64, error) {
+	res, err := s.db.Exec(`UPDATE ci_runs SET status = 'error' WHERE status = 'running'`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func scanCIRuns(rows *sql.Rows) ([]CIRun, error) {
+	var runs []CIRun
+	for rows.Next() {
+		var run CIRun
+		var exitCode sql.NullInt64
+		var startedAt, finishedAt sql.NullString
+		var queuedAtStr string
+		if err := rows.Scan(
+			&run.ID, &run.RepoID, &run.SHA, &run.Ref, &run.Event, &run.Status,
+			&exitCode, &run.Image, &queuedAtStr, &startedAt, &finishedAt,
+		); err != nil {
+			return nil, err
+		}
+		run.QueuedAt, _ = time.Parse(time.RFC3339, queuedAtStr)
+		if exitCode.Valid {
+			n := int(exitCode.Int64)
+			run.ExitCode = &n
+		}
+		if startedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, startedAt.String)
+			run.StartedAt = &t
+		}
+		if finishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339, finishedAt.String)
+			run.FinishedAt = &t
+		}
+		runs = append(runs, run)
+	}
+	if runs == nil {
+		runs = []CIRun{}
+	}
+	return runs, rows.Err()
 }
 
 // Bootstrap creates the admin user and registers their key if the user doesn't exist yet.

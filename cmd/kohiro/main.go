@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/iceice666/kohiro/auth"
+	"github.com/iceice666/kohiro/ci"
 	kohirogit "github.com/iceice666/kohiro/git"
 	"github.com/iceice666/kohiro/store"
 	"github.com/iceice666/kohiro/tui"
@@ -37,6 +39,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.MkdirAll(kohirogit.RepoDir, 0o700); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.MkdirAll(ci.LogDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
 
@@ -75,7 +80,22 @@ func main() {
 		return
 	}
 
-	hooks := auth.New(st)
+	// Detect container runtime; hard-fail if none available.
+	runtime, err := ci.DetectRuntime()
+	if err != nil {
+		log.Fatalf("CI runtime: %v", err)
+	}
+	log.Printf("CI runtime: %s", runtime)
+
+	runner := ci.NewShellRunner(runtime)
+	queue := ci.NewQueue(st, ci.LogDir)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go queue.Run(ctx, runner)
+
+	hooks := auth.New(st, queue)
 
 	s, err := wish.NewServer(
 		wish.WithAddress(listenAddr),
@@ -86,6 +106,7 @@ func main() {
 		}),
 		wish.WithMiddleware(
 			tui.Middleware(st, hooks),
+			logsMiddleware(st, hooks),
 			wishgit.Middleware(kohirogit.RepoDir, hooks),
 			logging.Middleware(),
 		),
@@ -94,9 +115,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		log.Printf("kohiro listening on %s", listenAddr)
 		if err := s.ListenAndServe(); err != nil {
@@ -104,8 +122,9 @@ func main() {
 		}
 	}()
 
-	<-sig
+	<-ctx.Done()
 	_ = s.Close()
+	queue.Wait()
 }
 
 func splitOwnerName(s string) (owner, name string, ok bool) {

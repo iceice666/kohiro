@@ -100,6 +100,39 @@ func Blob(repo *gogit.Repository, path string, maxBytes int64) (data []byte, tru
 	return buf, false, err
 }
 
+// BlobAt returns file contents at path in the tree of commit sha, capped at maxBytes.
+// truncated is true when the file is larger than maxBytes but within the hard cap.
+// Returns ErrTooLarge when the file exceeds the 1 MiB hard cap.
+func BlobAt(repo *gogit.Repository, sha, path string, maxBytes int64) (data []byte, truncated bool, err error) {
+	commit, err := repo.CommitObject(plumbing.NewHash(sha))
+	if err != nil {
+		return nil, false, err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, false, err
+	}
+	f, err := tree.File(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if f.Size > blobHardCap {
+		return nil, false, ErrTooLarge
+	}
+	r, err := f.Reader()
+	if err != nil {
+		return nil, false, err
+	}
+	defer r.Close()
+	if f.Size > maxBytes {
+		buf := make([]byte, maxBytes)
+		_, err = io.ReadFull(r, buf)
+		return buf, true, err
+	}
+	buf, err := io.ReadAll(r)
+	return buf, false, err
+}
+
 // IsBinary reports whether b looks like binary data (NUL byte in first 8 KiB).
 func IsBinary(b []byte) bool {
 	check := b

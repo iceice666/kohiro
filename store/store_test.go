@@ -374,3 +374,135 @@ func TestDeleteRepo_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func setupCIFixture(t *testing.T) (*store.Store, int64) {
+	t.Helper()
+	s := openTemp(t)
+	u, _ := s.AddUser("alice", false)
+	r, _ := s.EnsureRepo(u.ID, "myrepo")
+	return s, r.ID
+}
+
+func TestEnqueueRun(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+
+	run, err := s.EnqueueRun(repoID, "abc123", "refs/heads/main", "push", "alpine:latest")
+	if err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+	if run.Status != "queued" || run.SHA != "abc123" || run.RepoID != repoID {
+		t.Fatalf("unexpected run: %+v", run)
+	}
+}
+
+func TestClaimNextRun_EmptyQueue(t *testing.T) {
+	s, _ := setupCIFixture(t)
+	_, ok, err := s.ClaimNextRun()
+	if err != nil {
+		t.Fatalf("ClaimNextRun: %v", err)
+	}
+	if ok {
+		t.Fatal("expected no run in empty queue")
+	}
+}
+
+func TestClaimNextRun_FIFO(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+	r1, _ := s.EnqueueRun(repoID, "sha1", "refs/heads/main", "push", "alpine:latest")
+	s.EnqueueRun(repoID, "sha2", "refs/heads/main", "push", "alpine:latest")
+
+	claimed, ok, err := s.ClaimNextRun()
+	if err != nil || !ok {
+		t.Fatalf("ClaimNextRun: ok=%v err=%v", ok, err)
+	}
+	if claimed.ID != r1.ID {
+		t.Fatalf("expected first enqueued run, got id=%d", claimed.ID)
+	}
+	if claimed.Status != "running" {
+		t.Fatalf("expected status=running, got %q", claimed.Status)
+	}
+}
+
+func TestMarkRunFinished(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+	run, _ := s.EnqueueRun(repoID, "sha1", "refs/heads/main", "push", "alpine:latest")
+	s.ClaimNextRun()
+
+	if err := s.MarkRunFinished(run.ID, "success", 0); err != nil {
+		t.Fatalf("MarkRunFinished: %v", err)
+	}
+
+	got, err := s.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Status != "success" || got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("unexpected run state: %+v", got)
+	}
+	if got.FinishedAt == nil {
+		t.Fatal("FinishedAt should be set")
+	}
+}
+
+func TestListRunsForRepo(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+	s.EnqueueRun(repoID, "sha1", "refs/heads/main", "push", "alpine:latest")
+	s.EnqueueRun(repoID, "sha2", "refs/heads/main", "push", "alpine:latest")
+	s.EnqueueRun(repoID, "sha3", "refs/heads/main", "push", "alpine:latest")
+
+	runs, err := s.ListRunsForRepo(repoID, 50)
+	if err != nil {
+		t.Fatalf("ListRunsForRepo: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("expected 3 runs, got %d", len(runs))
+	}
+	// Newest first.
+	if runs[0].SHA != "sha3" {
+		t.Fatalf("expected newest first, got sha=%q", runs[0].SHA)
+	}
+}
+
+func TestListRunsForRepo_EmptyIsNonNil(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+	runs, err := s.ListRunsForRepo(repoID, 50)
+	if err != nil {
+		t.Fatalf("ListRunsForRepo: %v", err)
+	}
+	if runs == nil {
+		t.Fatal("expected non-nil empty slice")
+	}
+}
+
+func TestGetRun_NotFound(t *testing.T) {
+	s, _ := setupCIFixture(t)
+	_, err := s.GetRun(99999)
+	if err != store.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRecoverStaleRuns(t *testing.T) {
+	s, repoID := setupCIFixture(t)
+	s.EnqueueRun(repoID, "sha1", "refs/heads/main", "push", "alpine:latest")
+	s.EnqueueRun(repoID, "sha2", "refs/heads/main", "push", "alpine:latest")
+
+	// Claim both to put them in 'running' state.
+	s.ClaimNextRun()
+	s.ClaimNextRun()
+
+	n, err := s.RecoverStaleRuns()
+	if err != nil {
+		t.Fatalf("RecoverStaleRuns: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 stale runs recovered, got %d", n)
+	}
+
+	runs, _ := s.ListRunsForRepo(repoID, 50)
+	for _, r := range runs {
+		if r.Status != "error" {
+			t.Fatalf("expected status=error after recovery, got %q", r.Status)
+		}
+	}
+}

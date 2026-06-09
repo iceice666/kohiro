@@ -24,6 +24,7 @@ const (
 	detailFiles   detailTab = iota
 	detailCommits detailTab = iota
 	detailIssues  detailTab = iota
+	detailCI      detailTab = iota
 )
 
 type fileEntry struct {
@@ -85,6 +86,7 @@ type repoDetailModel struct {
 	commits list.Model
 
 	issues issuesModel
+	ci     ciModel
 
 	errMsg string
 }
@@ -109,6 +111,13 @@ func newRepoDetail(
 
 	issuesView := newIssuesView(owner, name, st, hooks, user, client, width, contentH)
 
+	// Resolve repo ID for CI view (best-effort; CI tab shows error if absent).
+	var repoID int64
+	if r, err := st.GetRepo(owner, name); err == nil {
+		repoID = r.ID
+	}
+	ciView := newCIView(owner, name, repoID, st, hooks, user, width, contentH)
+
 	m := repoDetailModel{
 		owner:   owner,
 		name:    name,
@@ -116,10 +125,11 @@ func newRepoDetail(
 		commits: cl,
 		blobVP:  vp,
 		issues:  issuesView,
+		ci:      ciView,
 		width:   width,
 		height:  height,
 	}
-	return m, tea.Batch(m.loadTreeCmd(""), m.loadCommitsCmd(), m.issues.Init())
+	return m, tea.Batch(m.loadTreeCmd(""), m.loadCommitsCmd(), m.issues.Init(), m.ci.Init())
 }
 
 func (m repoDetailModel) loadTreeCmd(dirPath string) tea.Cmd {
@@ -243,6 +253,11 @@ func (m repoDetailModel) Update(msg tea.Msg) (repoDetailModel, tea.Cmd) {
 		m.issues, cmd = m.issues.Update(msg)
 		return m, cmd
 
+	case ciRunsLoadedMsg, ciLogChunkMsg, ciTickMsg:
+		var cmd tea.Cmd
+		m.ci, cmd = m.ci.Update(msg)
+		return m, cmd
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -262,6 +277,10 @@ func (m repoDetailModel) Update(msg tea.Msg) (repoDetailModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.issues, cmd = m.issues.Update(msg)
 		return m, cmd
+	case detailCI:
+		var cmd tea.Cmd
+		m.ci, cmd = m.ci.Update(msg)
+		return m, cmd
 	default:
 		var cmd tea.Cmd
 		m.commits, cmd = m.commits.Update(msg)
@@ -273,7 +292,7 @@ func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 	switch {
 	case key.Matches(msg, defaultKeyMap.Tab):
 		if !m.blobOpen && !m.issues.IsModal() {
-			m.activeSub = (m.activeSub + 1) % 3
+			m.activeSub = (m.activeSub + 1) % 4
 		}
 		return m, nil
 
@@ -287,6 +306,12 @@ func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 		if m.activeSub == detailIssues && m.issues.mode != issuesModeList {
 			var cmd tea.Cmd
 			m.issues, cmd = m.issues.Update(msg)
+			return m, cmd
+		}
+		// Delegate Esc to CI when it is in log mode.
+		if m.activeSub == detailCI && m.ci.mode != ciModeList {
+			var cmd tea.Cmd
+			m.ci, cmd = m.ci.Update(msg)
 			return m, cmd
 		}
 		if m.currentPath != "" && m.activeSub == detailFiles {
@@ -330,6 +355,10 @@ func (m repoDetailModel) handleKey(msg tea.KeyMsg) (repoDetailModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.issues, cmd = m.issues.Update(msg)
 		return m, cmd
+	case detailCI:
+		var cmd tea.Cmd
+		m.ci, cmd = m.ci.Update(msg)
+		return m, cmd
 	default:
 		var cmd tea.Cmd
 		m.commits, cmd = m.commits.Update(msg)
@@ -360,7 +389,8 @@ func (m repoDetailModel) View() string {
 	sb.WriteString(breadcrumb + "  " +
 		renderTab("Files", detailFiles) + "  " +
 		renderTab("Commits", detailCommits) + "  " +
-		renderTab("Issues", detailIssues) + "\n")
+		renderTab("Issues", detailIssues) + "  " +
+		renderTab("CI", detailCI) + "\n")
 	sb.WriteString(styleSeparator.Render(strings.Repeat("─", m.width)) + "\n")
 
 	if m.errMsg != "" {
@@ -368,8 +398,12 @@ func (m repoDetailModel) View() string {
 		return sb.String()
 	}
 
-	if m.activeSub == detailIssues {
+	switch m.activeSub {
+	case detailIssues:
 		sb.WriteString(m.issues.View())
+		return sb.String()
+	case detailCI:
+		sb.WriteString(m.ci.View())
 		return sb.String()
 	}
 
@@ -397,6 +431,7 @@ func (m *repoDetailModel) setSize(w, h int) {
 	m.blobVP.Width = w
 	m.blobVP.Height = contentH
 	m.issues.setSize(w, contentH)
+	m.ci.setSize(w, contentH)
 }
 
 type popDetailMsg struct{}
