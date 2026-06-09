@@ -47,18 +47,18 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
-## Milestone 5 — CI
+## Milestone 5 — CI ✅
 > Push to a repo with `.ci/push` → job runs in a container → status visible in TUI.
 
-- [ ] Schema: `ci_runs` (id, repo_id, sha, ref, status, queued/started/finished timestamps)
-- [ ] `ci/queue.go`: SQLite-backed queue, channel notify, recover stale runs on restart
-- [ ] `ci/runner.go`: `Runner` interface; `ShellRunner` shells out to `podman`/`docker`/`nerdctl`
+- [x] Schema: `ci_runs` (id, repo_id, sha, ref, status, queued/started/finished timestamps)
+- [x] `ci/queue.go`: SQLite-backed queue, channel notify, recover stale runs on restart
+- [x] `ci/runner.go`: `Runner` interface; `ShellRunner` shells out to `podman`/`docker`/`nerdctl`
   - Reads `.ci/image` (default: `alpine:latest`)
-  - Mounts repo at `/work`, execs `.ci/<event>` inside container
+  - Extracts working tree via `git archive | tar` into a temp dir, mounts at `/work`
   - Streams stdout/stderr → `data/logs/<run-id>.log`
-- [ ] Wire `post-receive` hook → `queue.Enqueue`
-- [ ] TUI view: CI run list per repo, log viewer (tail)
-- [ ] SSH subcommand: `ssh host logs <owner>/<repo> [run-id]`
+- [x] Wire `post-receive` hook → `queue.Enqueue` (only when `.ci/push` exists at HEAD)
+- [x] TUI view: CI run list per repo, log viewer (tail)
+- [x] SSH subcommand: `ssh host logs <owner>/<repo> [run-id]`
 
 ---
 
