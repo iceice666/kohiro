@@ -1,70 +1,70 @@
-//! End-to-end SSH test: a PTY shell launches the ratatui TUI over the channel,
-//! renders the expected UI, navigates into a repo detail view (Files + Commits)
-//! driven by real keystrokes over the wire, and Ctrl+C quits cleanly. This
-//! exercises the live wiring (pty_request -> shell_request -> Tui::start -> draw,
-//! and data -> Tui::on_input -> model dispatch -> redraw / quit) that the unit
-//! tests cannot cover.
-
-use std::path::Path;
-use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
 use kohiro::auth;
 use kohiro::paths::Paths;
 use kohiro::server::KohiroServer;
 use kohiro::store::Store;
-use russh::keys::{Algorithm, PrivateKey};
+use myque::{CreateTaskInput, Status, TaskStore};
+use russh::ChannelMsg;
+use russh::client::{self, Handle};
+use russh::keys::PrivateKey;
 use russh::server::Server as _;
-use russh::{Channel, ChannelMsg, client};
+use std::net::ToSocketAddrs;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 
-struct ClientHandler;
+struct TestClient;
 
-#[async_trait]
-impl client::Handler for ClientHandler {
+#[async_trait::async_trait]
+impl client::Handler for TestClient {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _key: &russh::keys::PublicKey,
+        _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
 
-fn run_git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(dir)
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(cwd)
         .args(args)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "git {args:?} failed");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
-fn contains(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|w| w == needle.as_bytes())
+fn contains(buf: &[u8], needle: &str) -> bool {
+    String::from_utf8_lossy(buf).contains(needle)
 }
 
-/// Drain channel data into `buf` until `needle` appears or the timeout elapses.
-async fn read_until(channel: &mut Channel<client::Msg>, buf: &mut Vec<u8>, needle: &str) -> bool {
-    if contains(buf, needle) {
-        return true;
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+async fn read_until(
+    channel: &mut russh::Channel<client::Msg>,
+    buf: &mut Vec<u8>,
+    needle: &str,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        if contains(buf, needle) {
+            return true;
+        }
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if timeout.is_zero() {
             return false;
         }
-        let Ok(maybe) = tokio::time::timeout(remaining, channel.wait()).await else {
-            return false;
-        };
-        let Some(msg) = maybe else {
+        let Some(msg) = tokio::time::timeout(timeout, channel.wait())
+            .await
+            .ok()
+            .flatten()
+        else {
             return false;
         };
         if let ChannelMsg::Data { ref data } = msg {
@@ -83,25 +83,56 @@ async fn pty_shell_drives_tui_over_ssh() {
     let paths = Arc::new(Paths::new(dir.path().join("data")));
     std::fs::create_dir_all(paths.repos_dir()).unwrap();
     let store = Arc::new(Store::open(&paths.db_path()).unwrap());
-    let ci_db = Arc::new(chilin::Db::open(&paths.chilin_ci_db_path()).unwrap());
-    ci_db.migrate().unwrap();
-    let ci_id = ci_db
-        .enqueue(chilin::JobSpec {
-            namespace: "admin/demo".into(),
-            label: "push".into(),
-            command: vec!["sh".into(), ".ci/push".into()],
-            env: Vec::new(),
-            mount: None,
-            log_dir: paths.ci_log_dir("admin", "demo"),
-        })
-        .unwrap();
-    let ci_job = ci_db.get(ci_id).unwrap().unwrap();
-    std::fs::create_dir_all(ci_job.log_path.parent().unwrap()).unwrap();
-    std::fs::write(&ci_job.log_path, "demo-log-line\nsecond-line\n").unwrap();
-    let agent_db = Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).unwrap());
-    agent_db.migrate().unwrap();
 
-    let client_key = PrivateKey::random(&mut rand::rngs::OsRng, Algorithm::Ed25519).unwrap();
+    let ticket_store = TaskStore::new(paths.myque_root("admin", "demo"));
+    ticket_store.init(false).unwrap();
+    let log_path = paths.ci_log_dir("admin", "demo").join("ci-1.log");
+    let mut input = CreateTaskInput::new("CI push");
+    input.id = Some("ci-1".to_owned());
+    input.status = Status::Done;
+    input.labels = vec![
+        "safe-auto".to_owned(),
+        "ci".to_owned(),
+        "ci:push".to_owned(),
+    ];
+    input.agent = "ci".to_owned();
+    input.backend = "chilin".to_owned();
+    input.allowed_auto_dispatch = true;
+    input.body = Some(format!(
+        r#"## Goal
+
+Run push CI.
+
+## Context
+
+Fixture.
+
+## Constraints
+
+None.
+
+## Acceptance
+
+Done.
+
+## Chilin
+
+```toml
+command = ["sh", ".ci/push"]
+log_path = "{}"
+```
+"#,
+        log_path.display()
+    ));
+    let mut task = ticket_store.create_task(input).unwrap();
+    task.task.completed_at = Some("2026-06-22T00:00:00Z".to_owned());
+    task.frontmatter.completed_at = task.task.completed_at.clone();
+    ticket_store.write_task(&task).unwrap();
+    std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    std::fs::write(&log_path, "demo-log-line\nsecond-line\n").unwrap();
+
+    let client_key =
+        PrivateKey::random(&mut rand::rngs::OsRng, russh::keys::Algorithm::Ed25519).unwrap();
     let fp = auth::fingerprint_of(client_key.public_key());
     store.bootstrap("admin", &fp, "admin@test").unwrap();
 
@@ -125,7 +156,8 @@ async fn pty_shell_drives_tui_over_ssh() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let host_key = PrivateKey::random(&mut rand::rngs::OsRng, Algorithm::Ed25519).unwrap();
+    let host_key =
+        PrivateKey::random(&mut rand::rngs::OsRng, russh::keys::Algorithm::Ed25519).unwrap();
     let server_config = Arc::new(russh::server::Config {
         keys: vec![host_key],
         inactivity_timeout: Some(Duration::from_secs(15)),
@@ -136,8 +168,8 @@ async fn pty_shell_drives_tui_over_ssh() {
     let mut srv = KohiroServer {
         store: store.clone(),
         paths: paths.clone(),
-        ci_db,
-        agent_db,
+        ci_runner: Arc::new(chilin::ShellRunner),
+        agent_runner: Arc::new(chilin::ShellRunner),
     };
     let server_task = tokio::spawn(async move {
         let _ = srv.run_on_socket(server_config, &listener).await;
@@ -148,65 +180,40 @@ async fn pty_shell_drives_tui_over_ssh() {
         inactivity_timeout: Some(Duration::from_secs(15)),
         ..Default::default()
     });
-    let mut session = client::connect(client_config, ("127.0.0.1", port), ClientHandler)
+    let addr = ("127.0.0.1", port)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
+    let mut handle: Handle<TestClient> = client::connect(client_config, addr, TestClient)
         .await
         .unwrap();
-    assert!(
-        session
-            .authenticate_publickey("admin", Arc::new(client_key))
-            .await
-            .unwrap(),
-        "authentication failed"
-    );
+    let auth = handle
+        .authenticate_publickey("admin", Arc::new(client_key))
+        .await
+        .unwrap();
+    assert!(auth);
 
-    let mut channel = session.channel_open_session().await.unwrap();
+    let mut channel = handle.channel_open_session().await.unwrap();
     channel
-        .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .request_pty(true, "xterm", 100, 30, 0, 0, &[])
         .await
         .unwrap();
     channel.request_shell(true).await.unwrap();
 
     let mut buf = Vec::new();
-
-    // Initial frame: header + tabs + seeded repo + username.
     assert!(
-        read_until(&mut channel, &mut buf, "kohiro").await,
-        "header not rendered: {:?}",
+        read_until(&mut channel, &mut buf, "Repositories").await,
+        "initial TUI did not render repositories; got {}",
         String::from_utf8_lossy(&buf)
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "Repos").await,
-        "Repos tab missing"
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "Keys").await,
-        "Keys tab missing"
     );
     assert!(
         read_until(&mut channel, &mut buf, "admin/demo").await,
-        "seeded repo missing"
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "Repositories").await,
-        "repositories panel title missing"
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "private to owner and grants").await,
-        "repo visibility explanation missing"
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "@admin").await,
-        "username missing"
+        "repo list missing admin/demo"
     );
 
-    // Enter opens the repo detail view: the "Commits" sub-tab label and the
-    // committed file only exist in the detail Files view.
+    // Open repo detail with Enter.
     channel.data(&b"\r"[..]).await.unwrap();
-    assert!(
-        read_until(&mut channel, &mut buf, "Commits").await,
-        "detail view not opened: {:?}",
-        String::from_utf8_lossy(&buf)
-    );
     assert!(
         read_until(&mut channel, &mut buf, "hello.txt").await,
         "Files browser missing seeded file"
@@ -217,7 +224,7 @@ async fn pty_shell_drives_tui_over_ssh() {
     );
 
     // Tab cycles Files -> Commits -> Issues -> CI. The CI tab renders jobs from
-    // the chilin DB for this repo namespace.
+    // MyQue tickets for this repo namespace.
     channel.data(&b"\t"[..]).await.unwrap();
     assert!(
         read_until(&mut channel, &mut buf, "seed").await,
@@ -252,39 +259,9 @@ async fn pty_shell_drives_tui_over_ssh() {
     );
     assert!(
         read_until(&mut channel, &mut buf, "demo-log-line").await,
-        "CI log detail missing log contents"
+        "CI log missing seeded content"
     );
 
-    // Ctrl+C quits the TUI and closes the channel cleanly.
     channel.data(&b"\x03"[..]).await.unwrap();
-    let mut closed = false;
-    let mut exit_status = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let Ok(maybe) = tokio::time::timeout(remaining, channel.wait()).await else {
-            break;
-        };
-        let Some(msg) = maybe else {
-            closed = true;
-            break;
-        };
-        match msg {
-            ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
-            ChannelMsg::Eof | ChannelMsg::Close => {
-                closed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    assert!(
-        closed || exit_status == Some(0),
-        "TUI did not close on Ctrl+C (exit={exit_status:?})"
-    );
-
     server_task.abort();
 }

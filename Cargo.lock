@@ -290,18 +290,20 @@ dependencies = [
 [[package]]
 name = "chilin"
 version = "0.1.0"
-source = "git+https://github.com/mozufu/chilin.git#0262fb651704fe75d537fbac8c8ce6e1f817df4e"
+source = "git+https://github.com/mozufu/chilin.git#3963b620ddbb4c0a50a24dbf5fbe2adc20f3b304"
 dependencies = [
  "anyhow",
  "async-trait",
  "clap",
  "log",
+ "myque",
  "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1176,6 +1178,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1283,7 +1286,7 @@ dependencies = [
 [[package]]
 name = "myque"
 version = "0.1.0"
-source = "git+https://github.com/mozufu/myque.git#008b1b3119a107441a7a73400e74f09cf166a591"
+source = "git+https://github.com/mozufu/myque.git#a02c4f3017b7eaf6a90d7c900df801c67f693a31"
 dependencies = [
  "anyhow",
  "chrono",

@@ -6,7 +6,7 @@ use myque::{
 use std::sync::Arc;
 
 pub struct ContainerBackend {
-    pub agent_db: Arc<chilin::Db>,
+    pub runner: Arc<dyn chilin::Runner>,
     pub paths: Paths,
     pub owner: String,
     pub name: String,
@@ -88,31 +88,32 @@ impl AgentBackend for ContainerBackend {
         if let Err(e) = std::fs::copy(&task.path, workdir.join("task.md")) {
             return reject(format!("write task.md: {e}"));
         }
-        let spec = chilin::JobSpec {
-            namespace: format!("{}/{}", self.owner, self.name),
-            label: task.task.id.clone(),
-            command,
-            env: vec![
-                ("MYQUE_TASK_ID".into(), task.task.id.clone()),
-                ("MYQUE_REPO".into(), format!("{}/{}", self.owner, self.name)),
-            ],
-            mount: Some(chilin::Mount {
-                source: workdir,
-                target: "/work".into(),
-                readonly: false,
-            }),
-            log_dir: self.paths.agent_log_dir(&self.owner, &self.name),
-        };
-        match self.agent_db.enqueue(spec) {
-            Ok(id) => DispatchResult {
-                run_id,
-                started: true,
-                message: format!("queued container job {id}"),
-                ended_at: None,
-                exit_code: None,
-            },
-            Err(e) => reject(format!("enqueue: {e}")),
-        }
+
+        let log_dir = self.paths.agent_log_dir(&self.owner, &self.name);
+        let body = format!(
+            "{}\n\n## Chilin\n\n```toml\n{}\n```\n",
+            task.body.trim_end(),
+            chilin_block(
+                &command,
+                &[
+                    ("MYQUE_TASK_ID".to_owned(), task.task.id.clone()),
+                    (
+                        "MYQUE_REPO".to_owned(),
+                        format!("{}/{}", self.owner, self.name)
+                    ),
+                ],
+                &chilin::Mount {
+                    source: workdir.clone(),
+                    target: "/work".into(),
+                    readonly: false,
+                },
+                log_dir.join(format!("{run_id}.log"))
+            )
+        );
+        let mut dispatched = task.clone();
+        dispatched.body = body;
+        let backend = chilin::ChilinRunner::new(self.runner.clone(), log_dir);
+        backend.dispatch(&dispatched, config, run_id)
     }
 
     fn status(&self, run_id: &str, _: &Config) -> RunStatus {
@@ -126,4 +127,47 @@ impl AgentBackend for ContainerBackend {
     fn cancel(&self, _: &str, _: &Config) -> Result<(), BackendError> {
         Ok(())
     }
+}
+
+fn chilin_block(
+    command: &[String],
+    env: &[(String, String)],
+    mount: &chilin::Mount,
+    log_path: std::path::PathBuf,
+) -> String {
+    format!(
+        "command = {}\nenv = {}\nlog_path = {}\n\n[mount]\nsource = {}\ntarget = {}\nreadonly = {}",
+        toml_string_array(command),
+        toml_pairs(env),
+        toml_string(&log_path.display().to_string()),
+        toml_string(&mount.source.display().to_string()),
+        toml_string(&mount.target),
+        mount.readonly
+    )
+}
+
+fn toml_string_array(values: &[String]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| toml_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn toml_pairs(values: &[(String, String)]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|(key, value)| format!("[{}, {}]", toml_string(key), toml_string(value)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
 }

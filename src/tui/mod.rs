@@ -107,7 +107,6 @@ impl Tui {
         channel: ChannelId,
         store: Arc<Store>,
         paths: Arc<Paths>,
-        ci_db: Arc<chilin::Db>,
         user: Option<User>,
         cols: u16,
         rows: u16,
@@ -125,7 +124,7 @@ impl Tui {
         // shipped on the first draw's flush, so ordering with draws is kept.
         write!(terminal.backend_mut(), "\x1b[?1049h\x1b[?25l")?;
 
-        let mut model = RootModel::new(store, paths, ci_db, user);
+        let mut model = RootModel::new(store, paths, user);
         model.load_initial();
 
         let mut tui = Tui {
@@ -216,7 +215,6 @@ pub(crate) enum RootTab {
 pub(crate) struct RootModel {
     store: Arc<Store>,
     paths: Arc<Paths>,
-    ci_db: Arc<chilin::Db>,
     user: Option<User>,
     active: RootTab,
     repos: ReposPane,
@@ -225,18 +223,12 @@ pub(crate) struct RootModel {
 }
 
 impl RootModel {
-    fn new(
-        store: Arc<Store>,
-        paths: Arc<Paths>,
-        ci_db: Arc<chilin::Db>,
-        user: Option<User>,
-    ) -> Self {
+    fn new(store: Arc<Store>, paths: Arc<Paths>, user: Option<User>) -> Self {
         let repos = ReposPane::new(store.clone(), paths.clone(), user.clone());
         let keys = KeysPane::new(store.clone(), user.clone());
         Self {
             store,
             paths,
-            ci_db,
             user,
             active: RootTab::Repos,
             repos,
@@ -290,7 +282,6 @@ impl RootModel {
                         name,
                         self.store.clone(),
                         self.paths.clone(),
-                        self.ci_db.clone(),
                         self.user.clone(),
                     )
                     .await;

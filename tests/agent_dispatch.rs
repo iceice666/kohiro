@@ -4,7 +4,6 @@ use myque::{CreateTaskInput, Status, TaskStore};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 use tempfile::tempdir;
 
 fn git(args: &[&str], cwd: Option<&Path>) {
@@ -36,20 +35,6 @@ fn seed_bare(bare: &Path) {
         Some(work.path()),
     );
     git(&["push", "-q", "origin", "master"], Some(work.path()));
-}
-
-async fn wait_succeeded(db: &chilin::Db, id: i64) -> chilin::Job {
-    for _ in 0..200 {
-        let job = db.get(id).unwrap().unwrap();
-        match job.status {
-            chilin::JobStatus::Succeeded => return job,
-            chilin::JobStatus::Failed | chilin::JobStatus::Cancelled => {
-                panic!("job ended as {}", job.status)
-            }
-            _ => tokio::time::sleep(Duration::from_millis(50)).await,
-        }
-    }
-    panic!("job {id} did not finish")
 }
 
 #[tokio::test]
@@ -90,11 +75,9 @@ command = "sh -c 'cat task.md > seen.txt'"
     let task = store.create_task(input).unwrap();
     let config = store.load_config().unwrap();
 
-    let adb = Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).unwrap());
-    adb.migrate().unwrap();
     let mut reg = myque::BackendRegistry::with_builtins();
     reg.register(Box::new(ContainerBackend {
-        agent_db: adb.clone(),
+        runner: Arc::new(chilin::ShellRunner),
         paths: paths.clone(),
         owner: "o".into(),
         name: "r".into(),
@@ -102,15 +85,7 @@ command = "sh -c 'cat task.md > seen.txt'"
     let outcome = myque::dispatch_with(&store, &config, false, &reg).unwrap();
     assert_eq!(outcome.started.len(), 1, "{outcome:?}");
     assert!(outcome.rejected.is_empty(), "{outcome:?}");
-
-    let job_id = adb.list("o/r", 20).unwrap()[0].id;
-    let worker = tokio::spawn(chilin::run_worker(
-        adb.clone(),
-        Arc::new(chilin::ShellRunner),
-        Duration::from_millis(50),
-    ));
-    let job = wait_succeeded(&adb, job_id).await;
-    worker.abort();
+    assert_eq!(outcome.started[0].status, "done");
 
     let seen = std::fs::read_to_string(
         paths
@@ -120,9 +95,7 @@ command = "sh -c 'cat task.md > seen.txt'"
     )
     .unwrap();
     assert!(seen.contains(&task.task.id), "{seen}");
-    assert!(kohiro::ci::read_job_log(&job).is_empty());
-    assert_eq!(
-        store.get_task(&task.task.id).unwrap().task.status,
-        Status::Running
-    );
+    let updated = store.get_task(&task.task.id).unwrap();
+    assert_eq!(updated.task.status, Status::Done);
+    assert!(updated.task.completed_at.is_some());
 }

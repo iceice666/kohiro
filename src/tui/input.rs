@@ -191,7 +191,7 @@ impl MultilineInput {
         let (row, col) = self.cursor_position();
         if let Some(line) = lines.get_mut(row) {
             let idx = byte_index_for_col(line, col);
-            line.insert_str(idx, "▏");
+            line.insert(idx, '▏');
         }
         lines
     }

@@ -36,14 +36,6 @@ impl Paths {
         self.data_dir.join("myque").join(owner).join(name)
     }
 
-    pub fn chilin_ci_db_path(&self) -> PathBuf {
-        self.data_dir.join("chilin-ci.db")
-    }
-
-    pub fn chilin_agent_db_path(&self) -> PathBuf {
-        self.data_dir.join("chilin-agents.db")
-    }
-
     pub fn ci_log_dir(&self, owner: &str, name: &str) -> PathBuf {
         self.data_dir.join("ci").join("logs").join(owner).join(name)
     }

@@ -64,7 +64,6 @@ pub(crate) struct RepoDetail {
     commits: Vec<CommitEntry>,
     commits_state: ListState,
     issues: IssuesSub,
-    ci_db: Arc<chilin::Db>,
     ci_jobs: Vec<chilin::Job>,
     ci_state: ListState,
     selected_ci: Option<chilin::Job>,
@@ -78,7 +77,6 @@ impl RepoDetail {
         name: String,
         store: Arc<Store>,
         paths: Arc<Paths>,
-        ci_db: Arc<chilin::Db>,
         user: Option<User>,
     ) -> Self {
         let mut issues = IssuesSub::new(store, paths.clone(), user, owner.clone(), name.clone());
@@ -96,7 +94,6 @@ impl RepoDetail {
             blob_scroll: 0,
             commits: Vec::new(),
             commits_state: ListState::default(),
-            ci_db,
             ci_jobs: Vec::new(),
             ci_state: ListState::default(),
             selected_ci: None,
@@ -135,8 +132,7 @@ impl RepoDetail {
     }
 
     fn load_ci_jobs(&mut self) {
-        let namespace = format!("{}/{}", self.owner, self.name);
-        match self.ci_db.list(&namespace, 50) {
+        match ci::list_jobs(&self.paths, &self.owner, &self.name, 50) {
             Ok(jobs) => {
                 self.ci_jobs = jobs;
                 select_first(&mut self.ci_state, self.ci_jobs.len());
@@ -163,8 +159,8 @@ impl RepoDetail {
     }
 
     fn load_selected_ci(&mut self, id: i64) {
-        match self.ci_db.get(id) {
-            Ok(Some(job)) if job.namespace == format!("{}/{}", self.owner, self.name) => {
+        match ci::get_job(&self.paths, &self.owner, &self.name, id) {
+            Ok(Some(job)) => {
                 self.ci_log = ci::read_job_log(&job);
                 self.selected_ci = Some(job);
             }

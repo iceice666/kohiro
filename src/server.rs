@@ -17,8 +17,8 @@ use tokio::process::ChildStdin;
 pub struct KohiroServer {
     pub store: Arc<Store>,
     pub paths: Arc<Paths>,
-    pub ci_db: Arc<chilin::Db>,
-    pub agent_db: Arc<chilin::Db>,
+    pub ci_runner: Arc<dyn chilin::Runner>,
+    pub agent_runner: Arc<dyn chilin::Runner>,
 }
 
 impl server::Server for KohiroServer {
@@ -28,8 +28,8 @@ impl server::Server for KohiroServer {
         Conn::new(
             self.store.clone(),
             self.paths.clone(),
-            self.ci_db.clone(),
-            self.agent_db.clone(),
+            self.ci_runner.clone(),
+            self.agent_runner.clone(),
         )
     }
 
@@ -41,8 +41,8 @@ impl server::Server for KohiroServer {
 pub struct Conn {
     store: Arc<Store>,
     paths: Arc<Paths>,
-    ci_db: Arc<chilin::Db>,
-    agent_db: Arc<chilin::Db>,
+    ci_runner: Arc<dyn chilin::Runner>,
+    agent_runner: Arc<dyn chilin::Runner>,
     fp: Option<String>,
     git_stdin: HashMap<ChannelId, ChildStdin>,
     pty: Option<(u16, u16)>,
@@ -53,14 +53,14 @@ impl Conn {
     fn new(
         store: Arc<Store>,
         paths: Arc<Paths>,
-        ci_db: Arc<chilin::Db>,
-        agent_db: Arc<chilin::Db>,
+        ci_runner: Arc<dyn chilin::Runner>,
+        agent_runner: Arc<dyn chilin::Runner>,
     ) -> Self {
         Self {
             store,
             paths,
-            ci_db,
-            agent_db,
+            ci_runner,
+            agent_runner,
             fp: None,
             git_stdin: HashMap::new(),
             pty: None,
@@ -186,7 +186,7 @@ impl Conn {
         self.git_stdin.insert(channel, stdin);
 
         let handle = session.handle();
-        let ci_db = self.ci_db.clone();
+        let ci_runner = self.ci_runner.clone();
         let paths = self.paths.clone();
         let owner_c = owner.clone();
         let name_c = name.clone();
@@ -199,10 +199,8 @@ impl Conn {
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             let code = status.ok().and_then(|status| status.code()).unwrap_or(1) as u32;
-            if service == "receive-pack"
-                && code == 0
-                && let Err(e) = crate::ci::enqueue_push(
-                    &ci_db,
+            if service == "receive-pack" && code == 0 {
+                match crate::ci::enqueue_push(
                     &paths,
                     &owner_c,
                     &name_c,
@@ -210,8 +208,27 @@ impl Conn {
                     pusher.as_deref(),
                 )
                 .await
-            {
-                log::warn!("CI enqueue for {owner_c}/{name_c} failed: {e:#}");
+                {
+                    Ok(Some(_)) => {
+                        let dispatch_paths = paths.clone();
+                        let dispatch_owner = owner_c.clone();
+                        let dispatch_name = name_c.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = crate::ci::dispatch_ready(
+                                &dispatch_paths,
+                                &dispatch_owner,
+                                &dispatch_name,
+                                ci_runner,
+                            ) {
+                                log::warn!(
+                                    "CI dispatch for {dispatch_owner}/{dispatch_name} failed: {e:#}"
+                                );
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("CI enqueue for {owner_c}/{name_c} failed: {e:#}"),
+                }
             }
             let _ = handle.exit_status_request(channel, code).await;
             let _ = handle.eof(channel).await;
@@ -231,7 +248,7 @@ impl Conn {
         let (out, code) = tickets::run_issues(
             &self.store,
             &self.paths,
-            &self.agent_db,
+            &self.agent_runner,
             user.as_ref(),
             argv,
         );
@@ -273,9 +290,9 @@ impl Conn {
         if !auth::can_read(&self.store, user.as_ref(), &owner, &name) {
             return ("access denied\n".to_owned(), 1);
         }
-        let namespace = format!("{owner}/{name}");
         match cmd.as_str() {
-            "list" if argv.len() == 3 => match self.ci_db.list(&namespace, 20) {
+            "list" if argv.len() == 3 => match crate::ci::list_jobs(&self.paths, &owner, &name, 20)
+            {
                 Ok(jobs) => (crate::ci::format_job_table(&jobs), 0),
                 Err(e) => (format!("{e}\n"), 1),
             },
@@ -283,15 +300,15 @@ impl Conn {
                 let Some(id) = argv.get(3).and_then(|s| s.parse::<i64>().ok()) else {
                     return usage();
                 };
-                match self.ci_db.get(id) {
-                    Ok(Some(j)) if j.namespace == namespace => {
+                match crate::ci::get_job(&self.paths, &owner, &name, id) {
+                    Ok(Some(j)) => {
                         if cmd == "show" {
                             (crate::ci::format_job_detail(&j), 0)
                         } else {
                             (crate::ci::read_job_log(&j), 0)
                         }
                     }
-                    Ok(_) => ("no such run\n".to_owned(), 1),
+                    Ok(None) => ("no such run\n".to_owned(), 1),
                     Err(e) => (format!("{e}\n"), 1),
                 }
             }
@@ -349,7 +366,6 @@ impl server::Handler for Conn {
                 channel,
                 self.store.clone(),
                 self.paths.clone(),
-                self.ci_db.clone(),
                 self.current_user(),
                 cols,
                 rows,

@@ -57,21 +57,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let ci_db = Arc::new(chilin::Db::open(&paths.chilin_ci_db_path()).context("open ci db")?);
-    ci_db.migrate()?;
-    let agent_db =
-        Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).context("open agent db")?);
-    agent_db.migrate()?;
-    tokio::spawn(chilin::run_worker(
-        ci_db.clone(),
-        build_runner(&env_image("KOHIRO_CI_IMAGE")),
-        Duration::from_secs(2),
-    ));
-    tokio::spawn(chilin::run_worker(
-        agent_db.clone(),
-        build_runner(&env_image("KOHIRO_AGENT_IMAGE")),
-        Duration::from_secs(2),
-    ));
+    let ci_runner = build_runner(&env_image("KOHIRO_CI_IMAGE"));
+    let agent_runner = build_runner(&env_image("KOHIRO_AGENT_IMAGE"));
 
     let host_key = load_or_create_host_key(&paths.host_key_path()).context("load host key")?;
     let config = russh::server::Config {
@@ -84,8 +71,8 @@ async fn main() -> anyhow::Result<()> {
     let mut srv = KohiroServer {
         store,
         paths,
-        ci_db,
-        agent_db,
+        ci_runner,
+        agent_runner,
     };
     log::info!("kohiro listening on 0.0.0.0:2222");
     srv.run_on_address(Arc::new(config), ("0.0.0.0", 2222))

@@ -69,16 +69,15 @@ Each milestone is independently verifiable before moving on.
 
 - [x] Repos tab: list accessible repos, create (`n`), delete (`d`/`x`), toggle public (`p`).
 - [x] Keys tab: list / add (`a`) / remove (`d`/`x`) the signed-in user's SSH keys.
-- [x] Repo detail view: Files browser + blob viewer, commit log, and myque-backed Issues (`n` new, `e` edit body, `m` set status).
+- [x] Repo detail view: Files browser + blob viewer, commit log, myque-backed Issues (`n` new, `e` edit body, `m` set status), and CI jobs/logs.
 - [x] Rendered inline in the russh handler (`src/tui/`); non-PTY sessions print a hint.
 
-> Deferred: CI sub-tab (the CI runner remains deferred).
+> CI is no longer deferred: `.ci/push` jobs are MyQue tasks dispatched through `chilin`.
 
 ---
 
 ## Deferred / not yet ported
 
-- [ ] Container CI runner: `.ci/push`, queued runs, logs, TUI/SSH log views.
 - [ ] TOML config file (`kohiro.toml`) for listen addr and data dir.
 - [ ] SSH subcommand: `ssh host status` — server info, uptime, repo count.
 - [ ] Admin UI or subcommands for managing users, keys, and repos.

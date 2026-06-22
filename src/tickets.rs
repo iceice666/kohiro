@@ -1,6 +1,5 @@
 use crate::agent_backend::ContainerBackend;
 use crate::auth;
-use crate::ci;
 use crate::paths::Paths;
 use crate::store::{Store, User};
 use clap::{Parser, Subcommand};
@@ -170,7 +169,7 @@ impl IssuesCmd {
 pub fn run_issues(
     store: &Store,
     paths: &Paths,
-    agent_db: &Arc<chilin::Db>,
+    agent_runner: &Arc<dyn chilin::Runner>,
     user: Option<&User>,
     argv: &[String],
 ) -> (String, i32) {
@@ -261,7 +260,7 @@ pub fn run_issues(
             };
             let mut reg = myque::BackendRegistry::with_builtins();
             reg.register(Box::new(ContainerBackend {
-                agent_db: agent_db.clone(),
+                runner: agent_runner.clone(),
                 paths: paths.clone(),
                 owner: owner.clone(),
                 name: name.clone(),
@@ -293,20 +292,20 @@ pub fn run_issues(
             if !auth::can_read(store, user, &owner, &name) {
                 return ("access denied\n".to_owned(), 1);
             }
-            match agent_db.list(&format!("{owner}/{name}"), 20) {
-                Ok(jobs) => (ci::format_job_table(&jobs), 0),
-                Err(err) => (format!("{err}\n"), 1),
+            match task_store(paths, &owner, &name).load_tasks() {
+                Ok(tasks) => (format_run_list(&tasks), 0),
+                Err(err) => store_error(err),
             }
         }
         IssuesCmd::Logs { id, .. } => {
             if !auth::can_read(store, user, &owner, &name) {
                 return ("access denied\n".to_owned(), 1);
             }
-            let namespace = format!("{owner}/{name}");
-            match agent_db.get(id) {
-                Ok(Some(j)) if j.namespace == namespace => (ci::read_job_log(&j), 0),
-                Ok(_) => ("no such run\n".to_owned(), 1),
-                Err(err) => (format!("{err}\n"), 1),
+            let ticket_store = task_store(paths, &owner, &name);
+            match read_task_run_log(&ticket_store, id) {
+                Ok(Some(log)) => (log, 0),
+                Ok(None) => ("no such run\n".to_owned(), 1),
+                Err(err) => store_error(err),
             }
         }
         IssuesCmd::New {
@@ -446,6 +445,56 @@ fn invalid_status_message() -> String {
         "unknown status; expected one of: {}\n",
         myque::Status::all().join(", ")
     )
+}
+
+fn format_run_list(tasks: &[StoredTask]) -> String {
+    let mut out = String::new();
+    for stored in tasks
+        .iter()
+        .filter(|stored| stored.task.last_run_id.is_some())
+    {
+        out.push_str(&format!(
+            "{:>6}  {:<10}  {:<24}  {}\n",
+            numeric_task_id(&stored.task.id),
+            stored.task.status,
+            stored.task.id,
+            stored.task.last_run_id.as_deref().unwrap_or("-")
+        ));
+    }
+    if out.is_empty() {
+        out.push_str("no runs\n");
+    }
+    out
+}
+
+fn read_task_run_log(store: &TaskStore, id: i64) -> Result<Option<String>, MyqueStoreError> {
+    let Some(stored) = store
+        .load_tasks()?
+        .into_iter()
+        .find(|stored| numeric_task_id(&stored.task.id) == id)
+    else {
+        return Ok(None);
+    };
+    let Some(run_id) = stored.task.last_run_id.as_deref() else {
+        return Ok(None);
+    };
+    let run = myque::read_run_record(store, run_id)?;
+    let Some(log_path) = run.message.rsplit_once("log=").map(|(_, path)| path.trim()) else {
+        return Ok(Some(format!("no log path for run {run_id}\n")));
+    };
+    match fs::read_to_string(log_path) {
+        Ok(log) => Ok(Some(log)),
+        Err(_) => Ok(Some(format!("no log yet at {log_path}\n"))),
+    }
+}
+
+fn numeric_task_id(task_id: &str) -> i64 {
+    task_id
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
 }
 
 fn store_error(err: MyqueStoreError) -> (String, i32) {
