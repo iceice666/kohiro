@@ -69,10 +69,10 @@ Each milestone is independently verifiable before moving on.
 
 - [x] Repos tab: list accessible repos, create (`n`), delete (`d`/`x`), toggle public (`p`).
 - [x] Keys tab: list / add (`a`) / remove (`d`/`x`) the signed-in user's SSH keys.
-- [x] Repo detail view: Files browser + blob viewer, commit log, and myque-backed Issues (`n` new, `m` set status).
+- [x] Repo detail view: Files browser + blob viewer, commit log, and myque-backed Issues (`n` new, `e` edit body, `m` set status).
 - [x] Rendered inline in the russh handler (`src/tui/`); non-PTY sessions print a hint.
 
-> Deferred: TUI issue body editing (creation is title + status only, parity with `issues new`) and a CI sub-tab (the CI runner remains deferred).
+> Deferred: CI sub-tab (the CI runner remains deferred).
 
 ---
 

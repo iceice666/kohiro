@@ -5,7 +5,7 @@ use crate::paths::Paths;
 use crate::store::{Store, User};
 use clap::{Parser, Subcommand};
 use myque::{CreateTaskInput, Status, StoreError as MyqueStoreError, StoredTask, TaskStore};
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 fn task_store(paths: &Paths, owner: &str, name: &str) -> TaskStore {
     TaskStore::new(paths.myque_root(owner, name))
@@ -42,11 +42,40 @@ pub fn create_titled(
     title: String,
     status: Status,
 ) -> Result<StoredTask, MyqueStoreError> {
+    create_with_body(paths, owner, name, title, status, None)
+}
+
+pub fn create_with_body(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+    title: String,
+    status: Status,
+    body: Option<String>,
+) -> Result<StoredTask, MyqueStoreError> {
     let store = task_store(paths, owner, name);
     ensure_initialized(&store)?;
     let mut input = CreateTaskInput::new(title);
     input.status = status;
+    input.body = body;
     store.create_task(input)
+}
+
+pub fn set_body(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+    id: &str,
+    body: String,
+) -> Result<StoredTask, MyqueStoreError> {
+    let store = task_store(paths, owner, name);
+    ensure_initialized(&store)?;
+    let mut stored = store.get_task(id)?;
+    stored.body = body;
+    stored.task.updated_at = chrono::Utc::now().to_rfc3339();
+    stored.frontmatter.updated_at = Some(stored.task.updated_at.clone());
+    store.write_task(&stored)?;
+    store.get_task(id)
 }
 
 pub fn set_status(
@@ -89,6 +118,18 @@ enum IssuesCmd {
         status: String,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<String>,
+    },
+    Edit {
+        repo: String,
+        id: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<String>,
     },
     Move {
         repo: String,
@@ -116,6 +157,7 @@ impl IssuesCmd {
             Self::List { repo, .. }
             | Self::Show { repo, .. }
             | Self::New { repo, .. }
+            | Self::Edit { repo, .. }
             | Self::Move { repo, .. }
             | Self::Board { repo }
             | Self::Dispatch { repo }
@@ -272,6 +314,8 @@ pub fn run_issues(
             labels,
             status,
             agent,
+            body,
+            body_file,
             ..
         } => {
             if !auth::can_write(store, user, &owner, &name) {
@@ -280,6 +324,10 @@ pub fn run_issues(
             let Some(status) = Status::parse_str(&status) else {
                 return (invalid_status_message(), 2);
             };
+            let body = match resolve_body_arg(body, body_file) {
+                Ok(body) => body,
+                Err(message) => return (message, 2),
+            };
             let ticket_store = task_store(paths, &owner, &name);
             if let Err(err) = ensure_initialized(&ticket_store) {
                 return store_error(err);
@@ -287,11 +335,36 @@ pub fn run_issues(
             let mut input = CreateTaskInput::new(title);
             input.status = status;
             input.labels = labels;
+            input.body = body;
             if let Some(agent) = agent {
                 input.agent = agent;
             }
             match ticket_store.create_task(input) {
                 Ok(stored) => (format!("{}\n", stored.task.id), 0),
+                Err(err) => store_error(err),
+            }
+        }
+        IssuesCmd::Edit {
+            id,
+            body,
+            body_file,
+            ..
+        } => {
+            if !auth::can_write(store, user, &owner, &name) {
+                return ("access denied\n".to_owned(), 1);
+            }
+            let Some(body) = (match resolve_body_arg(body, body_file) {
+                Ok(body) => body,
+                Err(message) => return (message, 2),
+            }) else {
+                return (
+                    "nothing to edit; pass --body or --body-file\n".to_owned(),
+                    2,
+                );
+            };
+            match set_body(paths, &owner, &name, &id, body) {
+                Ok(_) => (format!("edited {id}\n"), 0),
+                Err(MyqueStoreError::TaskNotFound(_)) => (format!("no such ticket: {id}\n"), 1),
                 Err(err) => store_error(err),
             }
         }
@@ -312,6 +385,26 @@ pub fn run_issues(
                 Err(err) => store_error(err),
             }
         }
+    }
+}
+
+fn resolve_body_arg(
+    body: Option<String>,
+    body_file: Option<String>,
+) -> Result<Option<String>, String> {
+    match (body, body_file) {
+        (Some(_), Some(_)) => Err("pass only one of --body or --body-file\n".to_owned()),
+        (Some(body), None) => Ok(Some(body)),
+        (None, Some(path)) if path == "-" => {
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
+                .map_err(|err| format!("failed to read body from stdin: {err}\n"))?;
+            Ok(Some(body))
+        }
+        (None, Some(path)) => fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|err| format!("failed to read body file {path}: {err}\n")),
+        (None, None) => Ok(None),
     }
 }
 

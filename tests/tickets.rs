@@ -70,6 +70,27 @@ fn issues_commands_manage_myque_tasks() {
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("status: ready"), "{out}");
+    assert!(out.contains("## Goal"), "{out}");
+
+    let (out, code) = run_issues(
+        &store,
+        &paths,
+        &agent_db,
+        Some(&owner),
+        &argv(&["issues", "edit", "o/r", &id, "--body", "edited body"]),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out, format!("edited {id}\n"));
+
+    let (out, code) = run_issues(
+        &store,
+        &paths,
+        &agent_db,
+        Some(&owner),
+        &argv(&["issues", "show", "o/r", &id]),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("edited body"), "{out}");
 
     let (_out, code) = run_issues(
         &store,
@@ -93,13 +114,21 @@ fn issues_commands_manage_myque_tasks() {
 
 #[test]
 fn typed_helpers_create_and_update_tasks() {
-    use kohiro::tickets::{create_titled, get_task, list_tasks, set_status};
+    use kohiro::tickets::{create_with_body, get_task, list_tasks, set_body, set_status};
     use myque::Status;
 
     let dir = tempdir().unwrap();
     let paths = Paths::new(dir.path().join("data"));
 
-    let created = create_titled(&paths, "o", "r", "from tui".into(), Status::Backlog).unwrap();
+    let created = create_with_body(
+        &paths,
+        "o",
+        "r",
+        "from tui".into(),
+        Status::Backlog,
+        Some("first body".into()),
+    )
+    .unwrap();
     let id = created.task.id.clone();
 
     let tasks = list_tasks(&paths, "o", "r").unwrap();
@@ -112,4 +141,8 @@ fn typed_helpers_create_and_update_tasks() {
     set_status(&paths, "o", "r", &id, Status::Ready).unwrap();
     let fetched = get_task(&paths, "o", "r", &id).unwrap();
     assert_eq!(fetched.task.status, Status::Ready);
+    assert_eq!(fetched.body.trim(), "first body");
+
+    let edited = set_body(&paths, "o", "r", &id, "edited\nbody".into()).unwrap();
+    assert_eq!(edited.body.trim(), "edited\nbody");
 }
