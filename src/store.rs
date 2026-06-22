@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Error as SqliteError};
+use rusqlite::{Connection, Error as SqliteError, params};
 use std::path::Path;
 use std::sync::Mutex;
 

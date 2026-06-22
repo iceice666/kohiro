@@ -11,10 +11,12 @@ fn temp_store() -> (tempfile::TempDir, Store) {
 fn bootstrap_and_lookup_are_idempotent() {
     let (_dir, store) = temp_store();
 
-    assert!(store
-        .user_by_fingerprint("SHA256:missing")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .user_by_fingerprint("SHA256:missing")
+            .unwrap()
+            .is_none()
+    );
 
     store
         .bootstrap("admin", "SHA256:key", "admin@example")

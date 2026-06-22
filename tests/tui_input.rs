@@ -1,4 +1,4 @@
-use kohiro::tui::input::{decode, Key};
+use kohiro::tui::input::{Key, decode};
 
 #[test]
 fn decodes_control_keys_arrows_and_text() {
