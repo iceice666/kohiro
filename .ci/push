@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+echo "kohiro demo CI"
+echo "repo: ${CI_REPO:-unknown}"
+echo "sha: ${CI_SHA:-unknown}"
+echo "pusher: ${CI_PUSHER:-unknown}"
+
+cargo test
