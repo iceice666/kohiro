@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState, Paragraph, Wrap};
 
-use super::input::{Key, TextInput};
+use super::input::{Key, MultilineInput, TextInput};
 use super::{BLUE, DetailOutcome, OVERLAY, PEACH, PURPLE, SUBTEXT, TEAL};
 use crate::auth;
 use crate::git::{self, BlobView, CommitEntry, TreeEntry};
@@ -344,6 +344,7 @@ enum IssuesMode {
     List,
     Detail,
     New,
+    EditBody,
     StatusPick,
 }
 
@@ -359,6 +360,7 @@ struct IssuesSub {
     selected: Option<StoredTask>,
     detail_scroll: u16,
     input: TextInput,
+    body_input: MultilineInput,
     status_state: ListState,
     toast: Option<(String, bool)>,
 }
@@ -381,9 +383,10 @@ impl IssuesSub {
             items: Vec::new(),
             state: ListState::default(),
             selected: None,
-            detail_scroll: 0,
             input: TextInput::default(),
+            body_input: MultilineInput::default(),
             status_state: ListState::default(),
+            detail_scroll: 0,
             toast: None,
         }
     }
@@ -419,6 +422,7 @@ impl IssuesSub {
             IssuesMode::List => self.update_list(key),
             IssuesMode::Detail => self.update_detail(key),
             IssuesMode::New => self.update_new(key),
+            IssuesMode::EditBody => self.update_edit_body(key),
             IssuesMode::StatusPick => self.update_status_pick(key),
         }
     }
@@ -487,6 +491,19 @@ impl IssuesSub {
                 self.detail_scroll = self.detail_scroll.saturating_add(10);
                 DetailOutcome::Redraw
             }
+            Key::Char('e') => {
+                if !self.can_write() {
+                    self.toast = Some(("not enough permission".into(), true));
+                    return DetailOutcome::Redraw;
+                }
+                if let Some(sel) = self.selected.as_ref() {
+                    self.body_input.set(sel.body.clone());
+                    self.detail_scroll = 0;
+                    self.mode = IssuesMode::EditBody;
+                    self.toast = None;
+                }
+                DetailOutcome::Redraw
+            }
             Key::Char('m') => {
                 if !self.can_write() {
                     self.toast = Some(("not enough permission".into(), true));
@@ -536,6 +553,42 @@ impl IssuesSub {
         }
     }
 
+    fn update_edit_body(&mut self, key: Key) -> DetailOutcome {
+        match key {
+            Key::CtrlS => {
+                let Some(id) = self.selected.as_ref().map(|t| t.task.id.clone()) else {
+                    self.mode = IssuesMode::Detail;
+                    return DetailOutcome::Redraw;
+                };
+                match tickets::set_body(
+                    &self.paths,
+                    &self.owner,
+                    &self.name,
+                    &id,
+                    self.body_input.value.clone(),
+                ) {
+                    Ok(updated) => {
+                        self.selected = Some(updated);
+                        self.toast = Some(("body saved".into(), false));
+                        self.load();
+                    }
+                    Err(err) => self.toast = Some((err.to_string(), true)),
+                }
+                self.mode = IssuesMode::Detail;
+                DetailOutcome::Redraw
+            }
+            Key::Esc => {
+                self.mode = IssuesMode::Detail;
+                self.body_input.clear();
+                DetailOutcome::Redraw
+            }
+            other => {
+                self.body_input.handle(&other);
+                DetailOutcome::Redraw
+            }
+        }
+    }
+
     fn update_status_pick(&mut self, key: Key) -> DetailOutcome {
         if super::handle_nav(&mut self.status_state, ALL_STATUSES.len(), &key) {
             return DetailOutcome::Redraw;
@@ -572,15 +625,28 @@ impl IssuesSub {
             IssuesMode::List => {
                 "↑↓ move · enter open · n new · esc back · tab switch · ctrl+c quit"
             }
-            IssuesMode::Detail => "↑↓ scroll · m set status · esc back · ctrl+c quit",
+            IssuesMode::Detail => "↑↓ scroll · e edit body · m set status · esc back · ctrl+c quit",
             IssuesMode::New => "enter: create · esc: cancel",
+            IssuesMode::EditBody => {
+                "type body · arrows move · enter newline · ctrl+s save · esc cancel"
+            }
             IssuesMode::StatusPick => "↑↓ move · enter set · esc cancel",
         }
     }
 
     fn render(&self, f: &mut Frame, area: Rect) {
-        let show_detail = matches!(self.mode, IssuesMode::Detail | IssuesMode::StatusPick);
-        if show_detail {
+        let show_detail = matches!(
+            self.mode,
+            IssuesMode::Detail | IssuesMode::EditBody | IssuesMode::StatusPick
+        );
+        if matches!(self.mode, IssuesMode::EditBody) {
+            if let Some(sel) = self.selected.as_ref() {
+                let para = Paragraph::new(issue_edit_lines(sel, &self.body_input))
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.detail_scroll, 0));
+                f.render_widget(para, area);
+            }
+        } else if show_detail {
             if let Some(sel) = self.selected.as_ref() {
                 let para = Paragraph::new(issue_detail_lines(sel))
                     .wrap(Wrap { trim: false })
@@ -616,6 +682,7 @@ impl IssuesSub {
                 ];
                 super::render_modal(f, area, "New Issue", lines);
             }
+            IssuesMode::EditBody => {}
             IssuesMode::StatusPick => {
                 let sel = self.status_state.selected().unwrap_or(0);
                 let mut lines: Vec<Line> = ALL_STATUSES
@@ -716,6 +783,27 @@ fn issue_detail_lines(task: &StoredTask) -> Vec<Line<'static>> {
     for line in task.body.lines() {
         lines.push(Line::from(line.to_owned()));
     }
+    lines
+}
+
+fn issue_edit_lines(task: &StoredTask, input: &MultilineInput) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("# {}", task.task.title),
+            Style::default().fg(PEACH).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("{} · {}", task.task.id, task.task.status.as_str()),
+            Style::default().fg(SUBTEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Editing issue body. Ctrl+S saves, Esc cancels. Arrow keys move the cursor.",
+            Style::default().fg(SUBTEXT),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(input.display_lines().into_iter().map(Line::from));
     lines
 }
 
