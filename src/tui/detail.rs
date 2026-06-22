@@ -1,5 +1,5 @@
-//! Repo detail view: Files (browser + blob viewer), Commits, Issues
-//! (myque-backed), and CI job sub-tabs. Ported from the Go `tui/repo_detail.go`
+//! Repo detail view: Files (browser + blob viewer), Commits, and Kanban
+//! (myque-backed task board). Ported from the Go `tui/repo_detail.go`
 //! and `tui/issues_view.go`, minus git-bug comments.
 
 use std::sync::Arc;
@@ -34,20 +34,104 @@ fn status_index(status: &Status) -> usize {
     ALL_STATUSES.iter().position(|s| s == status).unwrap_or(0)
 }
 
+/// Kanban tab/filter applied to the task list. CI tickets are regular tasks
+/// carrying the `ci` agent + label, so "CI" is one filter tab here rather
+/// than a separate repo-detail tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KanbanTab {
+    All,
+    Status(Status),
+    Ci,
+}
+
+impl KanbanTab {
+    fn label(&self) -> &'static str {
+        match self {
+            KanbanTab::All => "all",
+            KanbanTab::Status(status) => status.as_str(),
+            KanbanTab::Ci => "ci",
+        }
+    }
+
+    fn matches(&self, task: &StoredTask) -> bool {
+        match self {
+            KanbanTab::All => true,
+            KanbanTab::Status(status) => task.task.status == *status,
+            KanbanTab::Ci => ci::is_ci_task(task),
+        }
+    }
+}
+
+fn kanban_tabs() -> Vec<KanbanTab> {
+    let mut tabs = Vec::with_capacity(ALL_STATUSES.len() + 2);
+    tabs.push(KanbanTab::All);
+    tabs.extend(ALL_STATUSES.iter().cloned().map(KanbanTab::Status));
+    tabs.push(KanbanTab::Ci);
+    tabs
+}
+
+fn next_kanban_tab(tab: &KanbanTab) -> KanbanTab {
+    let tabs = kanban_tabs();
+    let idx = tabs
+        .iter()
+        .position(|candidate| candidate == tab)
+        .unwrap_or(0);
+    tabs[(idx + 1) % tabs.len()].clone()
+}
+
+fn prev_kanban_tab(tab: &KanbanTab) -> KanbanTab {
+    let tabs = kanban_tabs();
+    let idx = tabs
+        .iter()
+        .position(|candidate| candidate == tab)
+        .unwrap_or(0);
+    tabs[(idx + tabs.len() - 1) % tabs.len()].clone()
+}
+
+fn visible_task_indices(items: &[StoredTask], tab: &KanbanTab) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| tab.matches(task))
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+fn kanban_title(active: &KanbanTab) -> String {
+    let labels = kanban_tabs()
+        .into_iter()
+        .map(|tab| {
+            if &tab == active {
+                format!("[{}]", tab.label())
+            } else {
+                tab.label().to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Kanban · {labels}")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DetailSub {
     Files,
     Commits,
-    Issues,
-    Ci,
+    Kanban,
 }
 
 fn next_sub(sub: DetailSub) -> DetailSub {
     match sub {
         DetailSub::Files => DetailSub::Commits,
-        DetailSub::Commits => DetailSub::Issues,
-        DetailSub::Issues => DetailSub::Ci,
-        DetailSub::Ci => DetailSub::Files,
+        DetailSub::Commits => DetailSub::Kanban,
+        DetailSub::Kanban => DetailSub::Files,
+    }
+}
+
+fn prev_sub(sub: DetailSub) -> DetailSub {
+    match sub {
+        DetailSub::Files => DetailSub::Kanban,
+        DetailSub::Commits => DetailSub::Files,
+        DetailSub::Kanban => DetailSub::Commits,
     }
 }
 
@@ -63,12 +147,7 @@ pub(crate) struct RepoDetail {
     blob_scroll: u16,
     commits: Vec<CommitEntry>,
     commits_state: ListState,
-    issues: IssuesSub,
-    ci_jobs: Vec<chilin::Job>,
-    ci_state: ListState,
-    selected_ci: Option<chilin::Job>,
-    ci_log: String,
-    ci_scroll: u16,
+    kanban: KanbanSub,
 }
 
 impl RepoDetail {
@@ -79,8 +158,8 @@ impl RepoDetail {
         paths: Arc<Paths>,
         user: Option<User>,
     ) -> Self {
-        let mut issues = IssuesSub::new(store, paths.clone(), user, owner.clone(), name.clone());
-        issues.load();
+        let mut kanban = KanbanSub::new(store, paths.clone(), user, owner.clone(), name.clone());
+        kanban.load();
 
         let mut detail = RepoDetail {
             paths,
@@ -94,16 +173,10 @@ impl RepoDetail {
             blob_scroll: 0,
             commits: Vec::new(),
             commits_state: ListState::default(),
-            ci_jobs: Vec::new(),
-            ci_state: ListState::default(),
-            selected_ci: None,
-            ci_log: String::new(),
-            ci_scroll: 0,
-            issues,
+            kanban,
         };
         detail.load_tree().await;
         detail.load_commits().await;
-        detail.load_ci_jobs();
         detail
     }
 
@@ -131,71 +204,17 @@ impl RepoDetail {
         select_first(&mut self.commits_state, self.commits.len());
     }
 
-    fn load_ci_jobs(&mut self) {
-        match ci::list_jobs(&self.paths, &self.owner, &self.name, 50) {
-            Ok(jobs) => {
-                self.ci_jobs = jobs;
-                select_first(&mut self.ci_state, self.ci_jobs.len());
-            }
-            Err(_) => {
-                self.ci_jobs.clear();
-                self.ci_state.select(None);
-            }
-        }
-    }
-
-    fn open_ci_job(&mut self) -> DetailOutcome {
-        let Some(id) = self
-            .ci_state
-            .selected()
-            .and_then(|i| self.ci_jobs.get(i))
-            .map(|job| job.id)
-        else {
-            return DetailOutcome::Ignore;
-        };
-        self.load_selected_ci(id);
-        self.ci_scroll = 0;
-        DetailOutcome::Redraw
-    }
-
-    fn load_selected_ci(&mut self, id: i64) {
-        match ci::get_job(&self.paths, &self.owner, &self.name, id) {
-            Ok(Some(job)) => {
-                self.ci_log = ci::read_job_log(&job);
-                self.selected_ci = Some(job);
-            }
-            _ => {
-                self.ci_log = "no such CI job\n".to_owned();
-                self.selected_ci = None;
-            }
-        }
-    }
-
-    fn refresh_selected_ci(&mut self) -> DetailOutcome {
-        if let Some(id) = self.selected_ci.as_ref().map(|job| job.id) {
-            self.load_selected_ci(id);
-            DetailOutcome::Redraw
-        } else {
-            self.load_ci_jobs();
-            DetailOutcome::Redraw
-        }
-    }
-
-    fn scroll_ci_down(&mut self, by: u16) {
-        let max = self.ci_log.lines().count().saturating_sub(1) as u16;
-        self.ci_scroll = self.ci_scroll.saturating_add(by).min(max);
-    }
-
     pub(crate) async fn update(&mut self, key: Key) -> DetailOutcome {
         match key {
-            Key::Tab => {
-                let issues_modal =
-                    matches!(self.active_sub, DetailSub::Issues) && self.issues.is_modal();
-                if self.blob.is_none() && !issues_modal {
-                    self.active_sub = next_sub(self.active_sub);
-                    if matches!(self.active_sub, DetailSub::Ci) {
-                        self.load_ci_jobs();
-                    }
+            Key::Tab | Key::ShiftTab => {
+                let kanban_modal =
+                    matches!(self.active_sub, DetailSub::Kanban) && self.kanban.is_modal();
+                if self.blob.is_none() && !kanban_modal {
+                    self.active_sub = if key == Key::Tab {
+                        next_sub(self.active_sub)
+                    } else {
+                        prev_sub(self.active_sub)
+                    };
                 }
                 DetailOutcome::Redraw
             }
@@ -209,45 +228,7 @@ impl RepoDetail {
                         DetailOutcome::Ignore
                     }
                 }
-                DetailSub::Issues => self.issues.update(key),
-                DetailSub::Ci => {
-                    if self.selected_ci.is_some() {
-                        match key {
-                            Key::Char('r') => self.refresh_selected_ci(),
-                            Key::Up | Key::Char('k') => {
-                                self.ci_scroll = self.ci_scroll.saturating_sub(1);
-                                DetailOutcome::Redraw
-                            }
-                            Key::Down | Key::Char('j') => {
-                                self.scroll_ci_down(1);
-                                DetailOutcome::Redraw
-                            }
-                            Key::PageUp => {
-                                self.ci_scroll = self.ci_scroll.saturating_sub(10);
-                                DetailOutcome::Redraw
-                            }
-                            Key::PageDown => {
-                                self.scroll_ci_down(10);
-                                DetailOutcome::Redraw
-                            }
-                            _ => DetailOutcome::Ignore,
-                        }
-                    } else {
-                        match key {
-                            Key::Enter => self.open_ci_job(),
-                            Key::Char('r') => self.refresh_selected_ci(),
-                            _ if super::handle_nav(
-                                &mut self.ci_state,
-                                self.ci_jobs.len(),
-                                &key,
-                            ) =>
-                            {
-                                DetailOutcome::Redraw
-                            }
-                            _ => DetailOutcome::Ignore,
-                        }
-                    }
-                }
+                DetailSub::Kanban => self.kanban.update(key),
             },
         }
     }
@@ -257,15 +238,8 @@ impl RepoDetail {
             self.blob = None;
             return DetailOutcome::Redraw;
         }
-        if matches!(self.active_sub, DetailSub::Issues) && !self.issues.is_list() {
-            return self.issues.update(Key::Esc);
-        }
-        if matches!(self.active_sub, DetailSub::Ci) && self.selected_ci.is_some() {
-            self.selected_ci = None;
-            self.ci_log.clear();
-            self.ci_scroll = 0;
-            self.load_ci_jobs();
-            return DetailOutcome::Redraw;
+        if matches!(self.active_sub, DetailSub::Kanban) && !self.kanban.is_list() {
+            return self.kanban.update(Key::Esc);
         }
         if matches!(self.active_sub, DetailSub::Files) && !self.current_path.is_empty() {
             self.current_path = parent_path(&self.current_path);
@@ -402,22 +376,7 @@ impl RepoDetail {
                     &self.commits_state,
                 );
             }
-            DetailSub::Issues => self.issues.render(f, content),
-            DetailSub::Ci => {
-                if let Some(job) = self.selected_ci.as_ref() {
-                    render_ci_detail(f, content, job, &self.ci_log, self.ci_scroll);
-                } else {
-                    let items: Vec<ListItem> = self.ci_jobs.iter().map(ci_job_item).collect();
-                    super::render_list(
-                        f,
-                        content,
-                        "CI jobs",
-                        "No CI jobs yet. Push a commit with .ci/push to enqueue one.",
-                        items,
-                        &self.ci_state,
-                    );
-                }
-            }
+            DetailSub::Kanban => self.kanban.render(f, content),
         }
 
         let (toast, hint) = match self.active_sub {
@@ -426,22 +385,18 @@ impl RepoDetail {
             }
             DetailSub::Files => (
                 None,
-                "↑↓ move · enter open · esc back/up · tab switch · ctrl+c quit",
+                "↑↓ move · enter open · esc back/up · tab/shift+tab switch · ctrl+c quit",
             ),
-            DetailSub::Commits => (None, "↑↓ move · esc back · tab switch · ctrl+c quit"),
-            DetailSub::Issues => (self.issues.toast.as_ref(), self.issues.footer_hint()),
-            DetailSub::Ci if self.selected_ci.is_some() => {
-                (None, "↑↓ scroll · r refresh · esc jobs · ctrl+c quit")
-            }
-            DetailSub::Ci => (
+            DetailSub::Commits => (
                 None,
-                "↑↓ move · enter logs · r refresh · esc back · tab switch · ctrl+c quit",
+                "↑↓ move · esc back · tab/shift+tab switch · ctrl+c quit",
             ),
+            DetailSub::Kanban => (self.kanban.toast.as_ref(), self.kanban.footer_hint()),
         };
         super::render_footer(f, rows[3], toast, hint);
 
-        if matches!(self.active_sub, DetailSub::Issues) {
-            self.issues.render_modal_overlay(f, area);
+        if matches!(self.active_sub, DetailSub::Kanban) {
+            self.kanban.render_modal_overlay(f, area);
         }
     }
 
@@ -461,8 +416,7 @@ impl RepoDetail {
         for (label, sub) in [
             ("Files", DetailSub::Files),
             ("Commits", DetailSub::Commits),
-            ("Issues", DetailSub::Issues),
-            ("CI", DetailSub::Ci),
+            ("Kanban", DetailSub::Kanban),
         ] {
             let style = if self.active_sub == sub {
                 Style::default()
@@ -477,9 +431,9 @@ impl RepoDetail {
     }
 }
 
-// --- Issues sub-tab (myque-backed) ---------------------------------------
+// --- Kanban sub-tab (myque-backed) ---------------------------------------
 
-enum IssuesMode {
+enum KanbanMode {
     List,
     Detail,
     New,
@@ -487,14 +441,15 @@ enum IssuesMode {
     StatusPick,
 }
 
-struct IssuesSub {
+struct KanbanSub {
     store: Arc<Store>,
     paths: Arc<Paths>,
     user: Option<User>,
     owner: String,
     name: String,
-    mode: IssuesMode,
+    mode: KanbanMode,
     items: Vec<StoredTask>,
+    tab: KanbanTab,
     state: ListState,
     selected: Option<StoredTask>,
     detail_scroll: u16,
@@ -504,7 +459,7 @@ struct IssuesSub {
     toast: Option<(String, bool)>,
 }
 
-impl IssuesSub {
+impl KanbanSub {
     fn new(
         store: Arc<Store>,
         paths: Arc<Paths>,
@@ -518,8 +473,9 @@ impl IssuesSub {
             user,
             owner,
             name,
-            mode: IssuesMode::List,
+            mode: KanbanMode::List,
             items: Vec::new(),
+            tab: KanbanTab::All,
             state: ListState::default(),
             selected: None,
             input: TextInput::default(),
@@ -534,7 +490,8 @@ impl IssuesSub {
         match tickets::list_tasks(&self.paths, &self.owner, &self.name) {
             Ok(items) => {
                 self.items = items;
-                select_first(&mut self.state, self.items.len());
+                let count = self.visible().len();
+                select_first(&mut self.state, count);
             }
             Err(err) => {
                 self.items.clear();
@@ -544,12 +501,23 @@ impl IssuesSub {
         }
     }
 
+    /// Item indices of the tasks visible under the active Kanban tab.
+    fn visible(&self) -> Vec<usize> {
+        visible_task_indices(&self.items, &self.tab)
+    }
+
+    fn set_tab(&mut self, tab: KanbanTab) {
+        self.tab = tab;
+        let count = self.visible().len();
+        select_first(&mut self.state, count);
+    }
+
     fn is_modal(&self) -> bool {
-        matches!(self.mode, IssuesMode::New | IssuesMode::StatusPick)
+        matches!(self.mode, KanbanMode::New | KanbanMode::StatusPick)
     }
 
     fn is_list(&self) -> bool {
-        matches!(self.mode, IssuesMode::List)
+        matches!(self.mode, KanbanMode::List)
     }
 
     fn can_write(&self) -> bool {
@@ -558,24 +526,34 @@ impl IssuesSub {
 
     fn update(&mut self, key: Key) -> DetailOutcome {
         match self.mode {
-            IssuesMode::List => self.update_list(key),
-            IssuesMode::Detail => self.update_detail(key),
-            IssuesMode::New => self.update_new(key),
-            IssuesMode::EditBody => self.update_edit_body(key),
-            IssuesMode::StatusPick => self.update_status_pick(key),
+            KanbanMode::List => self.update_list(key),
+            KanbanMode::Detail => self.update_detail(key),
+            KanbanMode::New => self.update_new(key),
+            KanbanMode::EditBody => self.update_edit_body(key),
+            KanbanMode::StatusPick => self.update_status_pick(key),
         }
     }
 
     fn update_list(&mut self, key: Key) -> DetailOutcome {
-        if super::handle_nav(&mut self.state, self.items.len(), &key) {
+        let visible = self.visible();
+        if super::handle_nav(&mut self.state, visible.len(), &key) {
             return DetailOutcome::Redraw;
         }
         match key {
+            Key::Left => {
+                self.set_tab(prev_kanban_tab(&self.tab));
+                DetailOutcome::Redraw
+            }
+            Key::Right => {
+                self.set_tab(next_kanban_tab(&self.tab));
+                DetailOutcome::Redraw
+            }
             Key::Enter => {
                 let Some(id) = self
                     .state
                     .selected()
-                    .and_then(|i| self.items.get(i))
+                    .and_then(|sel| visible.get(sel))
+                    .and_then(|&i| self.items.get(i))
                     .map(|t| t.task.id.clone())
                 else {
                     return DetailOutcome::Ignore;
@@ -586,7 +564,7 @@ impl IssuesSub {
                             .select(Some(status_index(&task.task.status)));
                         self.selected = Some(task);
                         self.detail_scroll = 0;
-                        self.mode = IssuesMode::Detail;
+                        self.mode = KanbanMode::Detail;
                         self.toast = None;
                     }
                     Err(err) => self.toast = Some((err.to_string(), true)),
@@ -598,7 +576,7 @@ impl IssuesSub {
                     self.toast = Some(("not enough permission".into(), true));
                     return DetailOutcome::Redraw;
                 }
-                self.mode = IssuesMode::New;
+                self.mode = KanbanMode::New;
                 self.input.clear();
                 self.toast = None;
                 DetailOutcome::Redraw
@@ -610,7 +588,7 @@ impl IssuesSub {
     fn update_detail(&mut self, key: Key) -> DetailOutcome {
         match key {
             Key::Esc => {
-                self.mode = IssuesMode::List;
+                self.mode = KanbanMode::List;
                 self.selected = None;
                 DetailOutcome::Redraw
             }
@@ -638,7 +616,7 @@ impl IssuesSub {
                 if let Some(sel) = self.selected.as_ref() {
                     self.body_input.set(sel.body.clone());
                     self.detail_scroll = 0;
-                    self.mode = IssuesMode::EditBody;
+                    self.mode = KanbanMode::EditBody;
                     self.toast = None;
                 }
                 DetailOutcome::Redraw
@@ -652,7 +630,7 @@ impl IssuesSub {
                     self.status_state
                         .select(Some(status_index(&sel.task.status)));
                 }
-                self.mode = IssuesMode::StatusPick;
+                self.mode = KanbanMode::StatusPick;
                 DetailOutcome::Redraw
             }
             _ => DetailOutcome::Ignore,
@@ -667,7 +645,7 @@ impl IssuesSub {
                     self.toast = Some(("title cannot be empty".into(), true));
                     return DetailOutcome::Redraw;
                 }
-                self.mode = IssuesMode::List;
+                self.mode = KanbanMode::List;
                 match tickets::create_titled(
                     &self.paths,
                     &self.owner,
@@ -675,14 +653,14 @@ impl IssuesSub {
                     title,
                     Status::Backlog,
                 ) {
-                    Ok(_) => self.toast = Some(("issue created".into(), false)),
+                    Ok(_) => self.toast = Some(("task created".into(), false)),
                     Err(err) => self.toast = Some((err.to_string(), true)),
                 }
                 self.load();
                 DetailOutcome::Redraw
             }
             Key::Esc => {
-                self.mode = IssuesMode::List;
+                self.mode = KanbanMode::List;
                 DetailOutcome::Redraw
             }
             other => {
@@ -696,7 +674,7 @@ impl IssuesSub {
         match key {
             Key::CtrlS => {
                 let Some(id) = self.selected.as_ref().map(|t| t.task.id.clone()) else {
-                    self.mode = IssuesMode::Detail;
+                    self.mode = KanbanMode::Detail;
                     return DetailOutcome::Redraw;
                 };
                 match tickets::set_body(
@@ -713,11 +691,11 @@ impl IssuesSub {
                     }
                     Err(err) => self.toast = Some((err.to_string(), true)),
                 }
-                self.mode = IssuesMode::Detail;
+                self.mode = KanbanMode::Detail;
                 DetailOutcome::Redraw
             }
             Key::Esc => {
-                self.mode = IssuesMode::Detail;
+                self.mode = KanbanMode::Detail;
                 self.body_input.clear();
                 DetailOutcome::Redraw
             }
@@ -737,7 +715,7 @@ impl IssuesSub {
                 let idx = self.status_state.selected().unwrap_or(0);
                 let status = ALL_STATUSES[idx].clone();
                 let Some(id) = self.selected.as_ref().map(|t| t.task.id.clone()) else {
-                    self.mode = IssuesMode::Detail;
+                    self.mode = KanbanMode::Detail;
                     return DetailOutcome::Redraw;
                 };
                 match tickets::set_status(&self.paths, &self.owner, &self.name, &id, status) {
@@ -748,11 +726,11 @@ impl IssuesSub {
                     }
                     Err(err) => self.toast = Some((err.to_string(), true)),
                 }
-                self.mode = IssuesMode::Detail;
+                self.mode = KanbanMode::Detail;
                 DetailOutcome::Redraw
             }
             Key::Esc => {
-                self.mode = IssuesMode::Detail;
+                self.mode = KanbanMode::Detail;
                 DetailOutcome::Redraw
             }
             _ => DetailOutcome::Ignore,
@@ -761,44 +739,55 @@ impl IssuesSub {
 
     fn footer_hint(&self) -> &'static str {
         match self.mode {
-            IssuesMode::List => {
-                "↑↓ move · enter open · n new · esc back · tab switch · ctrl+c quit"
+            KanbanMode::List => {
+                "↑↓ move · ←→ status tab · enter open · n new · esc back · tab/shift+tab switch · ctrl+c quit"
             }
-            IssuesMode::Detail => "↑↓ scroll · e edit body · m set status · esc back · ctrl+c quit",
-            IssuesMode::New => "enter: create · esc: cancel",
-            IssuesMode::EditBody => {
+            KanbanMode::Detail => "↑↓ scroll · e edit body · m set status · esc back · ctrl+c quit",
+            KanbanMode::New => "enter: create · esc: cancel",
+            KanbanMode::EditBody => {
                 "type body · arrows move · enter newline · ctrl+s save · esc cancel"
             }
-            IssuesMode::StatusPick => "↑↓ move · enter set · esc cancel",
+            KanbanMode::StatusPick => "↑↓ move · enter set · esc cancel",
         }
     }
 
     fn render(&self, f: &mut Frame, area: Rect) {
         let show_detail = matches!(
             self.mode,
-            IssuesMode::Detail | IssuesMode::EditBody | IssuesMode::StatusPick
+            KanbanMode::Detail | KanbanMode::EditBody | KanbanMode::StatusPick
         );
-        if matches!(self.mode, IssuesMode::EditBody) {
+        if matches!(self.mode, KanbanMode::EditBody) {
             if let Some(sel) = self.selected.as_ref() {
-                let para = Paragraph::new(issue_edit_lines(sel, &self.body_input))
+                let para = Paragraph::new(kanban_edit_lines(sel, &self.body_input))
                     .wrap(Wrap { trim: false })
                     .scroll((self.detail_scroll, 0));
                 f.render_widget(para, area);
             }
         } else if show_detail {
             if let Some(sel) = self.selected.as_ref() {
-                let para = Paragraph::new(issue_detail_lines(sel))
+                let para = Paragraph::new(kanban_detail_lines(sel))
                     .wrap(Wrap { trim: false })
                     .scroll((self.detail_scroll, 0));
                 f.render_widget(para, area);
             }
         } else {
-            let items: Vec<ListItem> = self.items.iter().map(issue_item).collect();
+            let visible = self.visible();
+            let mut items: Vec<ListItem> = visible
+                .iter()
+                .map(|&i| kanban_item(&self.items[i]))
+                .collect();
+            if items.is_empty() {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    "No tasks in this Kanban tab.",
+                    Style::default().fg(SUBTEXT),
+                ))));
+            }
+            let title = kanban_title(&self.tab);
             super::render_list(
                 f,
                 area,
-                "Issues",
-                "No issues yet. Press n to create one.",
+                &title,
+                "No tasks yet. Press n to create one.",
                 items,
                 &self.state,
             );
@@ -807,10 +796,10 @@ impl IssuesSub {
 
     fn render_modal_overlay(&self, f: &mut Frame, area: Rect) {
         match self.mode {
-            IssuesMode::New => {
+            KanbanMode::New => {
                 let lines = vec![
                     Line::from(Span::styled(
-                        "New issue title:",
+                        "New task title:",
                         Style::default().fg(SUBTEXT),
                     )),
                     Line::from(super::input_line(&self.input.value)),
@@ -819,10 +808,10 @@ impl IssuesSub {
                         Style::default().fg(SUBTEXT),
                     )),
                 ];
-                super::render_modal(f, area, "New Issue", lines);
+                super::render_modal(f, area, "New Kanban task", lines);
             }
-            IssuesMode::EditBody => {}
-            IssuesMode::StatusPick => {
+            KanbanMode::EditBody => {}
+            KanbanMode::StatusPick => {
                 let sel = self.status_state.selected().unwrap_or(0);
                 let mut lines: Vec<Line> = ALL_STATUSES
                     .iter()
@@ -880,70 +869,7 @@ fn commit_item(commit: &CommitEntry) -> ListItem<'static> {
     ListItem::new(vec![title, desc])
 }
 
-fn ci_job_item(job: &chilin::Job) -> ListItem<'static> {
-    let title = Line::from(vec![
-        Span::styled(
-            format!("#{:<5}", job.id),
-            Style::default().fg(PEACH).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("[{}]", job.status), Style::default().fg(BLUE)),
-        Span::raw("  "),
-        Span::raw(job.label.clone()),
-    ]);
-    let desc = Line::from(Span::styled(
-        format!("{}  {}", job.enqueued_at, ci::format_command(&job.command)),
-        Style::default().fg(SUBTEXT),
-    ));
-    ListItem::new(vec![title, desc])
-}
-
-fn render_ci_detail(f: &mut Frame, area: Rect, job: &chilin::Job, log: &str, scroll: u16) {
-    let rows = ratatui::layout::Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(1)])
-        .split(area);
-    let meta = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("CI job #{}", job.id),
-                Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(format!("[{}]", job.status), Style::default().fg(BLUE)),
-        ]),
-        Line::from(Span::styled(
-            format!("command: {}", ci::format_command(&job.command)),
-            Style::default().fg(SUBTEXT),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "queued: {}  started: {}  ended: {}",
-                job.enqueued_at,
-                job.started_at.as_deref().unwrap_or("-"),
-                job.ended_at.as_deref().unwrap_or("-")
-            ),
-            Style::default().fg(SUBTEXT),
-        )),
-    ];
-    f.render_widget(Paragraph::new(meta).wrap(Wrap { trim: false }), rows[0]);
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(OVERLAY))
-        .title(Span::styled(
-            " CI log ",
-            Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(
-        Paragraph::new(log.to_owned())
-            .block(block)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        rows[1],
-    );
-}
-
-fn issue_item(task: &StoredTask) -> ListItem<'static> {
+fn kanban_item(task: &StoredTask) -> ListItem<'static> {
     let title = Line::from(vec![
         Span::styled(
             format!("[{}]", task.task.status),
@@ -959,7 +885,7 @@ fn issue_item(task: &StoredTask) -> ListItem<'static> {
     ListItem::new(vec![title, desc])
 }
 
-fn issue_detail_lines(task: &StoredTask) -> Vec<Line<'static>> {
+fn kanban_detail_lines(task: &StoredTask) -> Vec<Line<'static>> {
     let t = &task.task;
     let mut lines = vec![
         Line::from(Span::styled(
@@ -988,7 +914,7 @@ fn issue_detail_lines(task: &StoredTask) -> Vec<Line<'static>> {
     lines
 }
 
-fn issue_edit_lines(task: &StoredTask, input: &MultilineInput) -> Vec<Line<'static>> {
+fn kanban_edit_lines(task: &StoredTask, input: &MultilineInput) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("# {}", task.task.title),
@@ -1000,7 +926,7 @@ fn issue_edit_lines(task: &StoredTask, input: &MultilineInput) -> Vec<Line<'stat
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Editing issue body. Ctrl+S saves, Esc cancels. Arrow keys move the cursor.",
+            "Editing task body. Ctrl+S saves, Esc cancels. Arrow keys move the cursor.",
             Style::default().fg(SUBTEXT),
         )),
         Line::from(""),
@@ -1043,5 +969,107 @@ fn parent_path(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((parent, _)) => parent.to_owned(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use myque::{CreateTaskInput, TaskStore};
+    use tempfile::tempdir;
+
+    fn plain(title: &str, status: Status) -> CreateTaskInput {
+        let mut input = CreateTaskInput::new(title);
+        input.status = status;
+        input
+    }
+
+    fn ci(title: &str, status: Status) -> CreateTaskInput {
+        let mut input = plain(title, status);
+        input.agent = "ci".to_owned();
+        input.labels = vec!["ci".to_owned()];
+        input
+    }
+
+    fn store_with(inputs: Vec<CreateTaskInput>) -> Vec<StoredTask> {
+        let dir = tempdir().unwrap();
+        let store = TaskStore::new(dir.path());
+        store.init(false).unwrap();
+        for input in inputs {
+            store.create_task(input).unwrap();
+        }
+        store.load_tasks().unwrap()
+    }
+
+    fn statuses_of(items: &[StoredTask], tab: &KanbanTab) -> Vec<Status> {
+        visible_task_indices(items, tab)
+            .iter()
+            .map(|&i| items[i].task.status.clone())
+            .collect()
+    }
+
+    #[test]
+    fn kanban_tabs_include_all_statuses_and_ci() {
+        let tabs = kanban_tabs();
+        assert_eq!(tabs.len(), ALL_STATUSES.len() + 2);
+        assert_eq!(tabs.first(), Some(&KanbanTab::All));
+        assert_eq!(tabs.last(), Some(&KanbanTab::Ci));
+        for (tab, status) in tabs[1..=ALL_STATUSES.len()].iter().zip(ALL_STATUSES.iter()) {
+            assert_eq!(tab, &KanbanTab::Status(status.clone()));
+        }
+    }
+
+    #[test]
+    fn status_tabs_flatten_tasks_by_status() {
+        let items = store_with(vec![
+            plain("a", Status::Backlog),
+            plain("b", Status::Ready),
+            ci("c", Status::Ready),
+            ci("d", Status::Running),
+        ]);
+
+        let all = visible_task_indices(&items, &KanbanTab::All);
+        assert_eq!(all.len(), 4);
+
+        let ready = visible_task_indices(&items, &KanbanTab::Status(Status::Ready));
+        assert_eq!(ready.len(), 2);
+        assert!(ready.iter().all(|&i| items[i].task.status == Status::Ready));
+
+        let running = statuses_of(&items, &KanbanTab::Status(Status::Running));
+        assert_eq!(running, vec![Status::Running]);
+
+        let done = visible_task_indices(&items, &KanbanTab::Status(Status::Done));
+        assert!(done.is_empty());
+    }
+
+    #[test]
+    fn ci_is_a_special_kanban_tab() {
+        let items = store_with(vec![
+            plain("a", Status::Backlog),
+            plain("b", Status::Ready),
+            ci("c", Status::Ready),
+            ci("d", Status::Running),
+        ]);
+
+        let mut ci_statuses = statuses_of(&items, &KanbanTab::Ci);
+        ci_statuses.sort_by_key(status_index);
+        assert_eq!(ci_statuses, vec![Status::Ready, Status::Running]);
+    }
+
+    #[test]
+    fn kanban_tabs_cycle_forward_and_backward() {
+        assert_eq!(
+            next_kanban_tab(&KanbanTab::All),
+            KanbanTab::Status(Status::Backlog)
+        );
+        assert_eq!(prev_kanban_tab(&KanbanTab::All), KanbanTab::Ci);
+        assert_eq!(
+            next_kanban_tab(&KanbanTab::Status(Status::Cancelled)),
+            KanbanTab::Ci
+        );
+        assert_eq!(
+            prev_kanban_tab(&KanbanTab::Ci),
+            KanbanTab::Status(Status::Cancelled)
+        );
     }
 }

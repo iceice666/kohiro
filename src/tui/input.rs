@@ -10,6 +10,7 @@ pub enum Key {
     Enter,
     Esc,
     Tab,
+    ShiftTab,
     Backspace,
     Left,
     Right,
@@ -113,6 +114,7 @@ fn parse_escape(seq: &[u8]) -> (Option<Key>, usize) {
                 b'B' => Some(Key::Down),
                 b'C' => Some(Key::Right),
                 b'D' => Some(Key::Left),
+                b'Z' if params.is_empty() => Some(Key::ShiftTab),
                 b'~' => match params {
                     b"5" => Some(Key::PageUp),
                     b"6" => Some(Key::PageDown),
@@ -292,4 +294,14 @@ fn line_spans(value: &str) -> Vec<(usize, usize)> {
     }
     spans.push((start, value.len()));
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_shift_tab_escape_sequence() {
+        assert_eq!(decode(b"\x1b[Z"), vec![Key::ShiftTab]);
+    }
 }

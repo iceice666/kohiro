@@ -288,7 +288,7 @@ fn task_to_job(paths: &Paths, owner: &str, name: &str, stored: StoredTask) -> Re
     })
 }
 
-fn is_ci_task(stored: &StoredTask) -> bool {
+pub(crate) fn is_ci_task(stored: &StoredTask) -> bool {
     stored.task.agent == CI_AGENT && stored.task.labels.iter().any(|label| label == "ci")
 }
 

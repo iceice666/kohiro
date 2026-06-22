@@ -223,9 +223,9 @@ log_path = "{}"
         "Files panel title missing"
     );
 
-    // Tab cycles Files -> Commits -> Issues -> CI. The CI tab renders jobs from
-    // MyQue tickets for this repo namespace.
+    // Tab cycles Files -> Commits -> Kanban. Shift+Tab goes back.
     channel.data(&b"\t"[..]).await.unwrap();
+    buf.clear();
     assert!(
         read_until(&mut channel, &mut buf, "seed").await,
         "Commits view missing commit subject"
@@ -234,32 +234,40 @@ log_path = "{}"
         read_until(&mut channel, &mut buf, "Admin").await,
         "Commits view missing commit author"
     );
-    channel.data(&b"\t\t"[..]).await.unwrap();
+
+    channel.data(&b"\t"[..]).await.unwrap();
+    buf.clear();
     assert!(
-        read_until(&mut channel, &mut buf, "CI jobs").await,
-        "CI tab panel title missing"
+        read_until(&mut channel, &mut buf, "Kanban · [all]").await,
+        "Kanban view missing flattened status-tab title"
     );
     assert!(
-        read_until(&mut channel, &mut buf, "push").await,
-        "CI tab missing seeded job label"
-    );
-    assert!(
-        read_until(&mut channel, &mut buf, "sh .ci/push").await,
-        "CI tab missing seeded job command"
+        read_until(&mut channel, &mut buf, "CI push").await,
+        "Kanban view missing seeded task title"
     );
 
-    channel.data(&b"\r"[..]).await.unwrap();
+    // Status filters are flattened into left/right Kanban tabs; all -> done is
+    // six right-arrow steps for the seeded done task.
+    channel
+        .data(&b"\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C"[..])
+        .await
+        .unwrap();
+    buf.clear();
     assert!(
-        read_until(&mut channel, &mut buf, "CI job #").await,
-        "CI job detail title missing"
+        read_until(&mut channel, &mut buf, "[done]").await,
+        "Kanban did not switch to the done status tab"
     );
     assert!(
-        read_until(&mut channel, &mut buf, "CI log").await,
-        "CI log panel title missing"
+        read_until(&mut channel, &mut buf, "CI push").await,
+        "Done Kanban tab missing seeded done task"
     );
+
+    // Shift+Tab returns from Kanban to Commits.
+    channel.data(&b"\x1b[Z"[..]).await.unwrap();
+    buf.clear();
     assert!(
-        read_until(&mut channel, &mut buf, "demo-log-line").await,
-        "CI log missing seeded content"
+        read_until(&mut channel, &mut buf, "Commits").await,
+        "Shift+Tab did not move back to Commits"
     );
 
     channel.data(&b"\x03"[..]).await.unwrap();

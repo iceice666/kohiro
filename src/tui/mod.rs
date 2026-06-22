@@ -262,10 +262,11 @@ impl RootModel {
             RootTab::Repos => self.repos.is_modal(),
             RootTab::Keys => self.keys.is_modal(),
         };
-        if key == Key::Tab && !active_modal {
-            self.active = match self.active {
-                RootTab::Repos => RootTab::Keys,
-                RootTab::Keys => RootTab::Repos,
+        if matches!(key, Key::Tab | Key::ShiftTab) && !active_modal {
+            self.active = match (self.active, key) {
+                (RootTab::Repos, Key::Tab) | (RootTab::Repos, Key::ShiftTab) => RootTab::Keys,
+                (RootTab::Keys, Key::Tab) | (RootTab::Keys, Key::ShiftTab) => RootTab::Repos,
+                _ => self.active,
             };
             return Outcome::Redraw;
         }
