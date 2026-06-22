@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState, Paragraph};
-use ratatui::Frame;
 
 use super::input::{Key, TextInput};
 use super::{PaneOutcome, SUBTEXT};
@@ -173,7 +173,7 @@ impl KeysPane {
     pub(crate) fn render(&self, f: &mut Frame, area: Rect) {
         if self.user.is_none() {
             f.render_widget(
-                Paragraph::new("Sign in with a registered key to view your SSH keys.")
+                Paragraph::new("Sign in with a registered SSH key to manage authorized keys.")
                     .style(Style::default().fg(SUBTEXT)),
                 area,
             );
@@ -186,9 +186,16 @@ impl KeysPane {
             .split(area);
 
         let items: Vec<ListItem> = self.items.iter().map(key_item).collect();
-        super::render_list(f, rows[0], items, &self.state);
+        super::render_list(
+            f,
+            rows[0],
+            "SSH keys",
+            "No SSH keys yet. Press a to add one.",
+            items,
+            &self.state,
+        );
 
-        let hint = "↑↓ move · a add · d/x delete · tab switch · ctrl+c quit";
+        let hint = "↑↓/j/k move · a add · d delete · tab repos · ctrl+c quit";
         super::render_footer(f, rows[1], self.toast.as_ref(), hint);
 
         match self.mode {

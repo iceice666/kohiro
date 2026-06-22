@@ -5,14 +5,14 @@
 use std::sync::Arc;
 
 use myque::{Status, StoredTask};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::input::{Key, TextInput};
-use super::{DetailOutcome, BLUE, OVERLAY, PEACH, PURPLE, SUBTEXT, TEAL};
+use super::{BLUE, DetailOutcome, OVERLAY, PEACH, PURPLE, SUBTEXT, TEAL};
 use crate::auth;
 use crate::git::{self, BlobView, CommitEntry, TreeEntry};
 use crate::paths::Paths;
@@ -260,12 +260,31 @@ impl RepoDetail {
                     render_blob(f, content, blob, self.blob_scroll);
                 } else {
                     let items: Vec<ListItem> = self.files.iter().map(file_item).collect();
-                    super::render_list(f, content, items, &self.files_state);
+                    let title = if self.current_path.is_empty() {
+                        "Files".to_owned()
+                    } else {
+                        format!("Files /{}", self.current_path)
+                    };
+                    super::render_list(
+                        f,
+                        content,
+                        &title,
+                        "No files on the default branch yet.",
+                        items,
+                        &self.files_state,
+                    );
                 }
             }
             DetailSub::Commits => {
                 let items: Vec<ListItem> = self.commits.iter().map(commit_item).collect();
-                super::render_list(f, content, items, &self.commits_state);
+                super::render_list(
+                    f,
+                    content,
+                    "Commits",
+                    "No commits yet. Push to this repository to populate history.",
+                    items,
+                    &self.commits_state,
+                );
             }
             DetailSub::Issues => self.issues.render(f, content),
         }
@@ -570,7 +589,14 @@ impl IssuesSub {
             }
         } else {
             let items: Vec<ListItem> = self.items.iter().map(issue_item).collect();
-            super::render_list(f, area, items, &self.state);
+            super::render_list(
+                f,
+                area,
+                "Issues",
+                "No issues yet. Press n to create one.",
+                items,
+                &self.state,
+            );
         }
     }
 

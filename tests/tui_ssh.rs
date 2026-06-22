@@ -174,6 +174,14 @@ async fn pty_shell_drives_tui_over_ssh() {
         "seeded repo missing"
     );
     assert!(
+        read_until(&mut channel, &mut buf, "Repositories").await,
+        "repositories panel title missing"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "private to owner and grants").await,
+        "repo visibility explanation missing"
+    );
+    assert!(
         read_until(&mut channel, &mut buf, "@admin").await,
         "username missing"
     );
@@ -189,6 +197,10 @@ async fn pty_shell_drives_tui_over_ssh() {
     assert!(
         read_until(&mut channel, &mut buf, "hello.txt").await,
         "Files browser missing seeded file"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "Files").await,
+        "Files panel title missing"
     );
 
     // Tab cycles Files -> Commits, which shows the seeded commit's subject and

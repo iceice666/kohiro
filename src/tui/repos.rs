@@ -3,14 +3,14 @@
 
 use std::sync::Arc;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState};
-use ratatui::Frame;
 
 use super::input::{Key, TextInput};
-use super::{PaneOutcome, GREEN, SUBTEXT, YELLOW};
+use super::{GREEN, PaneOutcome, SUBTEXT, YELLOW};
 use crate::auth;
 use crate::git;
 use crate::paths::Paths;
@@ -262,10 +262,15 @@ impl ReposPane {
             .split(area);
 
         let items: Vec<ListItem> = self.items.iter().map(repo_item).collect();
-        super::render_list(f, rows[0], items, &self.state);
+        let empty = if self.user.is_some() {
+            "No repositories yet. Press n to create one."
+        } else {
+            "No public repositories yet. Sign in with a registered key to create one."
+        };
+        super::render_list(f, rows[0], "Repositories", empty, items, &self.state);
 
         let hint =
-            "↑↓ move · enter open · n new · d/x delete · p toggle · tab switch · ctrl+c quit";
+            "↑↓/j/k move · enter open · n new · d delete · p visibility · tab keys · ctrl+c quit";
         super::render_footer(f, rows[1], self.toast.as_ref(), hint);
 
         match self.mode {
@@ -327,22 +332,27 @@ impl ReposPane {
 }
 
 fn repo_item(r: &RepoListing) -> ListItem<'static> {
-    let title = Line::from(format!("{}/{}", r.owner_username, r.name));
+    let title = Line::from(vec![
+        Span::styled(
+            format!("{}/{}", r.owner_username, r.name),
+            Style::default()
+                .fg(GREEN)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(visibility_str(r.public), Style::default().fg(SUBTEXT)),
+    ]);
     let (label, color) = if r.public {
-        ("● public", GREEN)
+        ("cloneable by anyone", GREEN)
     } else {
-        ("● private", YELLOW)
+        ("private to owner and grants", YELLOW)
     };
     let desc = Line::from(Span::styled(label, Style::default().fg(color)));
     ListItem::new(vec![title, desc])
 }
 
 fn visibility_str(public: bool) -> &'static str {
-    if public {
-        "public"
-    } else {
-        "private"
-    }
+    if public { "public" } else { "private" }
 }
 
 /// `^[a-z0-9][a-z0-9._-]{0,63}$` without pulling in a regex dependency.

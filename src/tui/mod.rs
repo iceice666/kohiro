@@ -22,9 +22,9 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
-use russh::server::Handle;
 use russh::ChannelId;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use russh::server::Handle;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::auth;
 use crate::paths::Paths;
@@ -421,17 +421,40 @@ pub(crate) fn handle_nav(state: &mut ListState, len: usize, key: &Key) -> bool {
     }
 }
 
-pub(crate) fn render_list(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &ListState) {
+pub(crate) fn render_list(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    empty_message: &str,
+    items: Vec<ListItem>,
+    state: &ListState,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(OVERLAY))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
+        ));
+
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("(none)", Style::default().fg(OVERLAY))),
+            Paragraph::new(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(empty_message.to_owned(), Style::default().fg(SUBTEXT)),
+            ]))
+            .block(block)
+            .wrap(Wrap { trim: false }),
             area,
         );
         return;
     }
+
     let list = List::new(items)
+        .block(block)
         .highlight_style(Style::default().fg(PURPLE).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▌ ");
+        .highlight_symbol("› ");
     let mut st = state.clone();
     f.render_stateful_widget(list, area, &mut st);
 }
