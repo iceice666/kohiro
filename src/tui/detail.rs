@@ -1,6 +1,6 @@
-//! Repo detail view: Files (browser + blob viewer), Commits, and Issues
-//! (myque-backed) sub-tabs. Ported from the Go `tui/repo_detail.go` and
-//! `tui/issues_view.go`, minus the dropped CI sub-tab and git-bug comments.
+//! Repo detail view: Files (browser + blob viewer), Commits, Issues
+//! (myque-backed), and CI job sub-tabs. Ported from the Go `tui/repo_detail.go`
+//! and `tui/issues_view.go`, minus git-bug comments.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::auth;
 use crate::git::{self, BlobView, CommitEntry, TreeEntry};
 use crate::paths::Paths;
 use crate::store::{Store, User};
-use crate::tickets;
+use crate::{ci, tickets};
 
 const ALL_STATUSES: [Status; 8] = [
     Status::Backlog,
@@ -39,13 +39,15 @@ enum DetailSub {
     Files,
     Commits,
     Issues,
+    Ci,
 }
 
 fn next_sub(sub: DetailSub) -> DetailSub {
     match sub {
         DetailSub::Files => DetailSub::Commits,
         DetailSub::Commits => DetailSub::Issues,
-        DetailSub::Issues => DetailSub::Files,
+        DetailSub::Issues => DetailSub::Ci,
+        DetailSub::Ci => DetailSub::Files,
     }
 }
 
@@ -62,6 +64,12 @@ pub(crate) struct RepoDetail {
     commits: Vec<CommitEntry>,
     commits_state: ListState,
     issues: IssuesSub,
+    ci_db: Arc<chilin::Db>,
+    ci_jobs: Vec<chilin::Job>,
+    ci_state: ListState,
+    selected_ci: Option<chilin::Job>,
+    ci_log: String,
+    ci_scroll: u16,
 }
 
 impl RepoDetail {
@@ -70,6 +78,7 @@ impl RepoDetail {
         name: String,
         store: Arc<Store>,
         paths: Arc<Paths>,
+        ci_db: Arc<chilin::Db>,
         user: Option<User>,
     ) -> Self {
         let mut issues = IssuesSub::new(store, paths.clone(), user, owner.clone(), name.clone());
@@ -87,10 +96,17 @@ impl RepoDetail {
             blob_scroll: 0,
             commits: Vec::new(),
             commits_state: ListState::default(),
+            ci_db,
+            ci_jobs: Vec::new(),
+            ci_state: ListState::default(),
+            selected_ci: None,
+            ci_log: String::new(),
+            ci_scroll: 0,
             issues,
         };
         detail.load_tree().await;
         detail.load_commits().await;
+        detail.load_ci_jobs();
         detail
     }
 
@@ -118,6 +134,62 @@ impl RepoDetail {
         select_first(&mut self.commits_state, self.commits.len());
     }
 
+    fn load_ci_jobs(&mut self) {
+        let namespace = format!("{}/{}", self.owner, self.name);
+        match self.ci_db.list(&namespace, 50) {
+            Ok(jobs) => {
+                self.ci_jobs = jobs;
+                select_first(&mut self.ci_state, self.ci_jobs.len());
+            }
+            Err(_) => {
+                self.ci_jobs.clear();
+                self.ci_state.select(None);
+            }
+        }
+    }
+
+    fn open_ci_job(&mut self) -> DetailOutcome {
+        let Some(id) = self
+            .ci_state
+            .selected()
+            .and_then(|i| self.ci_jobs.get(i))
+            .map(|job| job.id)
+        else {
+            return DetailOutcome::Ignore;
+        };
+        self.load_selected_ci(id);
+        self.ci_scroll = 0;
+        DetailOutcome::Redraw
+    }
+
+    fn load_selected_ci(&mut self, id: i64) {
+        match self.ci_db.get(id) {
+            Ok(Some(job)) if job.namespace == format!("{}/{}", self.owner, self.name) => {
+                self.ci_log = ci::read_job_log(&job);
+                self.selected_ci = Some(job);
+            }
+            _ => {
+                self.ci_log = "no such CI job\n".to_owned();
+                self.selected_ci = None;
+            }
+        }
+    }
+
+    fn refresh_selected_ci(&mut self) -> DetailOutcome {
+        if let Some(id) = self.selected_ci.as_ref().map(|job| job.id) {
+            self.load_selected_ci(id);
+            DetailOutcome::Redraw
+        } else {
+            self.load_ci_jobs();
+            DetailOutcome::Redraw
+        }
+    }
+
+    fn scroll_ci_down(&mut self, by: u16) {
+        let max = self.ci_log.lines().count().saturating_sub(1) as u16;
+        self.ci_scroll = self.ci_scroll.saturating_add(by).min(max);
+    }
+
     pub(crate) async fn update(&mut self, key: Key) -> DetailOutcome {
         match key {
             Key::Tab => {
@@ -125,6 +197,9 @@ impl RepoDetail {
                     matches!(self.active_sub, DetailSub::Issues) && self.issues.is_modal();
                 if self.blob.is_none() && !issues_modal {
                     self.active_sub = next_sub(self.active_sub);
+                    if matches!(self.active_sub, DetailSub::Ci) {
+                        self.load_ci_jobs();
+                    }
                 }
                 DetailOutcome::Redraw
             }
@@ -139,6 +214,44 @@ impl RepoDetail {
                     }
                 }
                 DetailSub::Issues => self.issues.update(key),
+                DetailSub::Ci => {
+                    if self.selected_ci.is_some() {
+                        match key {
+                            Key::Char('r') => self.refresh_selected_ci(),
+                            Key::Up | Key::Char('k') => {
+                                self.ci_scroll = self.ci_scroll.saturating_sub(1);
+                                DetailOutcome::Redraw
+                            }
+                            Key::Down | Key::Char('j') => {
+                                self.scroll_ci_down(1);
+                                DetailOutcome::Redraw
+                            }
+                            Key::PageUp => {
+                                self.ci_scroll = self.ci_scroll.saturating_sub(10);
+                                DetailOutcome::Redraw
+                            }
+                            Key::PageDown => {
+                                self.scroll_ci_down(10);
+                                DetailOutcome::Redraw
+                            }
+                            _ => DetailOutcome::Ignore,
+                        }
+                    } else {
+                        match key {
+                            Key::Enter => self.open_ci_job(),
+                            Key::Char('r') => self.refresh_selected_ci(),
+                            _ if super::handle_nav(
+                                &mut self.ci_state,
+                                self.ci_jobs.len(),
+                                &key,
+                            ) =>
+                            {
+                                DetailOutcome::Redraw
+                            }
+                            _ => DetailOutcome::Ignore,
+                        }
+                    }
+                }
             },
         }
     }
@@ -150,6 +263,13 @@ impl RepoDetail {
         }
         if matches!(self.active_sub, DetailSub::Issues) && !self.issues.is_list() {
             return self.issues.update(Key::Esc);
+        }
+        if matches!(self.active_sub, DetailSub::Ci) && self.selected_ci.is_some() {
+            self.selected_ci = None;
+            self.ci_log.clear();
+            self.ci_scroll = 0;
+            self.load_ci_jobs();
+            return DetailOutcome::Redraw;
         }
         if matches!(self.active_sub, DetailSub::Files) && !self.current_path.is_empty() {
             self.current_path = parent_path(&self.current_path);
@@ -287,6 +407,21 @@ impl RepoDetail {
                 );
             }
             DetailSub::Issues => self.issues.render(f, content),
+            DetailSub::Ci => {
+                if let Some(job) = self.selected_ci.as_ref() {
+                    render_ci_detail(f, content, job, &self.ci_log, self.ci_scroll);
+                } else {
+                    let items: Vec<ListItem> = self.ci_jobs.iter().map(ci_job_item).collect();
+                    super::render_list(
+                        f,
+                        content,
+                        "CI jobs",
+                        "No CI jobs yet. Push a commit with .ci/push to enqueue one.",
+                        items,
+                        &self.ci_state,
+                    );
+                }
+            }
         }
 
         let (toast, hint) = match self.active_sub {
@@ -299,6 +434,13 @@ impl RepoDetail {
             ),
             DetailSub::Commits => (None, "↑↓ move · esc back · tab switch · ctrl+c quit"),
             DetailSub::Issues => (self.issues.toast.as_ref(), self.issues.footer_hint()),
+            DetailSub::Ci if self.selected_ci.is_some() => {
+                (None, "↑↓ scroll · r refresh · esc jobs · ctrl+c quit")
+            }
+            DetailSub::Ci => (
+                None,
+                "↑↓ move · enter logs · r refresh · esc back · tab switch · ctrl+c quit",
+            ),
         };
         super::render_footer(f, rows[3], toast, hint);
 
@@ -324,6 +466,7 @@ impl RepoDetail {
             ("Files", DetailSub::Files),
             ("Commits", DetailSub::Commits),
             ("Issues", DetailSub::Issues),
+            ("CI", DetailSub::Ci),
         ] {
             let style = if self.active_sub == sub {
                 Style::default()
@@ -739,6 +882,69 @@ fn commit_item(commit: &CommitEntry) -> ListItem<'static> {
         Span::styled(commit.author.clone(), Style::default().fg(BLUE)),
     ]);
     ListItem::new(vec![title, desc])
+}
+
+fn ci_job_item(job: &chilin::Job) -> ListItem<'static> {
+    let title = Line::from(vec![
+        Span::styled(
+            format!("#{:<5}", job.id),
+            Style::default().fg(PEACH).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("[{}]", job.status), Style::default().fg(BLUE)),
+        Span::raw("  "),
+        Span::raw(job.label.clone()),
+    ]);
+    let desc = Line::from(Span::styled(
+        format!("{}  {}", job.enqueued_at, ci::format_command(&job.command)),
+        Style::default().fg(SUBTEXT),
+    ));
+    ListItem::new(vec![title, desc])
+}
+
+fn render_ci_detail(f: &mut Frame, area: Rect, job: &chilin::Job, log: &str, scroll: u16) {
+    let rows = ratatui::layout::Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(1)])
+        .split(area);
+    let meta = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("CI job #{}", job.id),
+                Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(format!("[{}]", job.status), Style::default().fg(BLUE)),
+        ]),
+        Line::from(Span::styled(
+            format!("command: {}", ci::format_command(&job.command)),
+            Style::default().fg(SUBTEXT),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "queued: {}  started: {}  ended: {}",
+                job.enqueued_at,
+                job.started_at.as_deref().unwrap_or("-"),
+                job.ended_at.as_deref().unwrap_or("-")
+            ),
+            Style::default().fg(SUBTEXT),
+        )),
+    ];
+    f.render_widget(Paragraph::new(meta).wrap(Wrap { trim: false }), rows[0]);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(OVERLAY))
+        .title(Span::styled(
+            " CI log ",
+            Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(
+        Paragraph::new(log.to_owned())
+            .block(block)
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        rows[1],
+    );
 }
 
 fn issue_item(task: &StoredTask) -> ListItem<'static> {

@@ -45,6 +45,10 @@ pub async fn enqueue_push(
     Ok(Some(id))
 }
 
+pub fn format_command(command: &[String]) -> String {
+    command.join(" ")
+}
+
 pub fn format_job_table(jobs: &[chilin::Job]) -> String {
     let mut out = String::new();
     for j in jobs {
@@ -54,7 +58,7 @@ pub fn format_job_table(jobs: &[chilin::Job]) -> String {
             j.status,
             j.label,
             j.enqueued_at,
-            j.command.join(" ")
+            format_command(&j.command)
         ));
     }
     if out.is_empty() {

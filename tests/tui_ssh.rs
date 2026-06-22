@@ -85,6 +85,19 @@ async fn pty_shell_drives_tui_over_ssh() {
     let store = Arc::new(Store::open(&paths.db_path()).unwrap());
     let ci_db = Arc::new(chilin::Db::open(&paths.chilin_ci_db_path()).unwrap());
     ci_db.migrate().unwrap();
+    let ci_id = ci_db
+        .enqueue(chilin::JobSpec {
+            namespace: "admin/demo".into(),
+            label: "push".into(),
+            command: vec!["sh".into(), ".ci/push".into()],
+            env: Vec::new(),
+            mount: None,
+            log_dir: paths.ci_log_dir("admin", "demo"),
+        })
+        .unwrap();
+    let ci_job = ci_db.get(ci_id).unwrap().unwrap();
+    std::fs::create_dir_all(ci_job.log_path.parent().unwrap()).unwrap();
+    std::fs::write(&ci_job.log_path, "demo-log-line\nsecond-line\n").unwrap();
     let agent_db = Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).unwrap());
     agent_db.migrate().unwrap();
 
@@ -203,10 +216,8 @@ async fn pty_shell_drives_tui_over_ssh() {
         "Files panel title missing"
     );
 
-    // Tab cycles Files -> Commits, which shows the seeded commit's subject and
-    // author. (The byte stream may split a multi-word subject across an
-    // unchanged cell during ratatui's diff render, so assert on the contiguous
-    // subject word and the author — both unique to the Commits view.)
+    // Tab cycles Files -> Commits -> Issues -> CI. The CI tab renders jobs from
+    // the chilin DB for this repo namespace.
     channel.data(&b"\t"[..]).await.unwrap();
     assert!(
         read_until(&mut channel, &mut buf, "seed").await,
@@ -215,6 +226,33 @@ async fn pty_shell_drives_tui_over_ssh() {
     assert!(
         read_until(&mut channel, &mut buf, "Admin").await,
         "Commits view missing commit author"
+    );
+    channel.data(&b"\t\t"[..]).await.unwrap();
+    assert!(
+        read_until(&mut channel, &mut buf, "CI jobs").await,
+        "CI tab panel title missing"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "push").await,
+        "CI tab missing seeded job label"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "sh .ci/push").await,
+        "CI tab missing seeded job command"
+    );
+
+    channel.data(&b"\r"[..]).await.unwrap();
+    assert!(
+        read_until(&mut channel, &mut buf, "CI job #").await,
+        "CI job detail title missing"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "CI log").await,
+        "CI log panel title missing"
+    );
+    assert!(
+        read_until(&mut channel, &mut buf, "demo-log-line").await,
+        "CI log detail missing log contents"
     );
 
     // Ctrl+C quits the TUI and closes the channel cleanly.

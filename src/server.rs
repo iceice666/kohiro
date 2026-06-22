@@ -349,6 +349,7 @@ impl server::Handler for Conn {
                 channel,
                 self.store.clone(),
                 self.paths.clone(),
+                self.ci_db.clone(),
                 self.current_user(),
                 cols,
                 rows,
