@@ -4,7 +4,7 @@ This file provides guidance to Agents when working with code in this repository.
 
 ## Project
 
-Kohiro is a self-hosted git server that speaks SSH. Clients interact via standard `git` commands and (eventually) an interactive TUI over SSH. See `docs/ROADMAP.md` for milestone-by-milestone progress.
+Kohiro is a self-hosted Rust git server that speaks SSH. Clients interact via standard `git` commands and the `issues` SSH subcommand. The interactive TUI and container CI runner are deferred in the Rust port. See `docs/ROADMAP.md` for milestone-by-milestone progress.
 
 ## Development environment
 
@@ -14,88 +14,65 @@ The project uses a Nix dev shell (`flake.nix`). Enter it with:
 nix develop
 ```
 
-This provides Go, gopls, goimports, git, git-bug, and sqlite. `GOPATH` is pinned to `.gopath/` inside the project root.
+This provides the Rust toolchain (`cargo`, `rustc`, `rustfmt`, `clippy`, `rust-analyzer`), `git`, `just`, `sqlite`, and native build tools for bundled SQLite / SSH crypto dependencies.
 
 ## Common commands
 
 ```sh
-go run ./cmd/kohiro          # start the SSH server on :2222
-go build ./...               # compile all packages
-go test ./...                # run all tests
-go vet ./...                 # static analysis
-goimports -w .               # format + fix imports
+cargo run              # start the SSH server on :2222
+cargo build            # compile the crate
+cargo test             # run all tests
+cargo fmt              # format Rust code
+cargo clippy -- -D warnings
+just check             # fmt check + clippy + tests
 ```
 
 Test the running server:
 
 ```sh
-ssh -p 2222 user@localhost                              # opens TUI
 ssh -T -p 2222 user@localhost                          # no-PTY hint
-git clone ssh://user@localhost:2222/owner/repo.git     # clone
+ssh -p 2222 user@localhost issues list owner/repo      # list tickets
+git clone ssh://user@localhost:2222/owner/repo.git     # clone/fetch
 ```
 
-## Issue tracking (git-bug)
+## Issue tracking (myque)
 
-Issues live in git-bug refs inside this repo and mirror to github.com/iceice666/kohiro
-via a configured bridge named `default`.
+Kohiro exposes per-repository tickets through SSH subcommands and stores them server-side with `myque`:
 
 ```sh
-git-bug bug                           # list open bugs
-git-bug bug show <id>                 # show one bug + comments
-git-bug bug new --title="..." \
-  --message="..." --non-interactive   # file a new issue
-git-bug bug comment new <id> -m "..."
-git-bug bug status close <id>
-
-git-bug bridge pull default           # import new/updated GitHub issues
-git-bug bridge push default           # push local changes upstream
-git-bug push                          # publish refs/bugs/* + refs/identities/* to origin
-git-bug pull                          # fetch bug refs from origin
+ssh host issues list owner/repo [--status ready]
+ssh host issues show owner/repo <task-id>
+ssh host issues new owner/repo --title "..." [--label bug] [--status backlog] [--agent coder]
+ssh host issues move owner/repo <task-id> ready
+ssh host issues board owner/repo
 ```
 
-`origin`'s fetch refspec includes `refs/bugs/*` and `refs/identities/*`, so a plain
-`git fetch origin` keeps bug data in sync along with branches.
-
-**First-time setup** (one-off; already done for the primary identity):
-```sh
-# 1. Create your identity (once per repo clone)
-git-bug user new --non-interactive --name "Your Name" --email "you@example.com"
-
-# 2. Configure the GitHub bridge (requires a PAT with `public_repo` scope)
-git-bug bridge new --name=default --target=github \
-  --owner=iceice666 --project=kohiro --token-stdin --non-interactive
-
-# 3. Initial import and publish
-git-bug bridge pull default
-git-bug push origin
-```
+Ticket files live outside the bare git repo at `data/myque/<owner>/<name>/.myque/`. They do not travel with `git clone`. Read operations require repo read access; `new` and `move` require write access.
 
 ## Architecture
 
-### Middleware chain (`cmd/kohiro/main.go`)
+### SSH dispatch (`src/server.rs`)
 
-`wish.NewServer` composes middleware in **reverse** order — the last listed runs first:
+Kohiro uses `russh` directly. Each connection gets a `Conn` handler:
 
-```
-tui.Middleware  →  wishgit.Middleware  →  logging.Middleware
-```
+- public-key auth accepts any presented key and records its SHA-256 fingerprint;
+- `exec_request` dispatches `git-upload-pack` / `git upload-pack`, `git-receive-pack` / `git receive-pack`, and `issues ...`;
+- git commands spawn the system `git` binary against bare repos under `data/repos/<owner>/<name>.git` and stream SSH channel data to/from the child process;
+- `issues` commands call the myque-backed ticket dispatcher synchronously and return command output over SSH;
+- PTY/shell sessions return a one-line TUI-deferred hint.
 
-- **tui.Middleware** — if the session has a PTY, launches the Bubble Tea TUI. Otherwise calls `next` so git ops fall through. Non-PTY sessions with no command receive a one-liner hint.
-- **wishgit.Middleware** — handles `git-upload-pack` / `git-receive-pack` commands, serving repos from `./data/repos/`.
-- **logging.Middleware** — logs every SSH session.
-
-`hooks := auth.New(st)` is the `wishgit.Hooks` implementation. It enforces per-repo access: admin/owner/explicit-grant → read-write; public repo → read-only; else no access.
+`auth::git_access`, `auth::can_read`, and `auth::can_write` enforce access: admin/owner/explicit-grant → read-write; public repo → read-only; else no access.
 
 ### Repo layout
 
-Bare repos live at `data/repos/<owner>/<name>.git`. `git.Init(owner, name)` creates one via `wishgit.EnsureRepo`. Host keys are stored in `data/.ssh/`.
+Bare repos live at `data/repos/<owner>/<name>.git`. Host keys are stored in `data/.ssh/host_key`. SQLite lives at `data/kohiro.db`. Ticket stores live at `data/myque/<owner>/<name>/.myque/`.
 
 ### Packages
 
-- `store/store.go` — SQLite (users, ssh_keys, repos, repo_perms)
-- `auth/auth.go` — SSH fingerprint → user lookup; `Hooks.AuthRepo` enforces access; `Hooks.UserFromSession` resolves the TUI user; `Hooks.CanRead` is shared by TUI and git path
-- `git/repo.go` — `RepoDir`, `Init`
-- `git/read.go` — `OpenRepo`, `CommitLog`, `HeadTree`, `TreeAt`, `Blob`, `IsBinary` via go-git
-- `tui/` — Bubble Tea TUI (Repos tab, Keys tab, file browser, commit log); entry via `tui.Middleware`
-- `ci/queue.go` — (planned M5) SQLite-backed job queue
-- `ci/runner.go` — (planned M5) `Runner` interface; `ShellRunner` execs `.ci/<event>` inside a container
+- `src/main.rs` — CLI flags, admin bootstrap, host key management, server startup.
+- `src/server.rs` — `russh` server and SSH exec/channel handling.
+- `src/store.rs` — SQLite users, SSH keys, repos, and repo permissions.
+- `src/auth.rs` — key fingerprint lookup, repo path parsing, access decisions.
+- `src/git.rs` — bare repo creation and git service command construction.
+- `src/tickets.rs` — `issues` CLI parser and myque integration.
+- `src/paths.rs` — centralized data path policy.

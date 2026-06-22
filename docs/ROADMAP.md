@@ -4,78 +4,71 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
-## Milestone 1 — SSH Foundation ✅
-> `ssh -p 2222 user@localhost` connects and prints a greeting.
+## Rust rewrite — Core server ✅
 
-- [x] `flake.nix` dev shell (go, git, git-bug, sqlite)
-- [x] `wish` server, host key generation, accept-all public key auth
-- [x] Greeting middleware + logging
+> `cargo build` produces a `kohiro` binary that serves git over SSH and manages per-repo myque tickets.
+
+- [x] Rust crate with `russh` SSH transport and `clap` CLI.
+- [x] SQLite auth store (`src/store.rs`): `users`, `ssh_keys`, `repos`, `repo_perms`.
+- [x] Admin bootstrap from `--admin-key` / `--admin-user`.
+- [x] Repo visibility flags: `--set-public owner/name`, `--set-private owner/name`.
+- [x] Git serving via `git upload-pack` / `git receive-pack` child processes.
+- [x] Access rules preserved: admin/owner/explicit grant can write; public repos are read-only; private repos deny outsiders.
+- [x] Server-side tickets via `ssh host issues ...`, backed by myque at `data/myque/<owner>/<name>/.myque/`.
+- [x] Go sources, git-bug integration, Wish/Bubble Tea middleware, and CI runner removed from the core build.
+
+---
+
+## Milestone 1 — SSH Foundation ✅
+
+> `ssh -T -p 2222 user@localhost` connects and prints the Rust-port TUI-deferred hint.
+
+- [x] `flake.nix` dev shell with Rust toolchain, git, sqlite, and native build tools.
+- [x] `russh` server with host key generation at `data/.ssh/host_key`.
+- [x] Accept-all public-key auth at the SSH layer; command handlers enforce authorization.
 
 ---
 
 ## Milestone 2 — Git Server ✅
-> `git clone ssh://user@localhost:2222/owner/repo.git` works.
 
-- [x] `wish/git` middleware wired to `data/repos/`
-- [x] `git/repo.go`: `Init(owner, name string)` — creates bare repo at `data/repos/<owner>/<name>.git`
-- [x] Stub access hook (allow all for now)
-- [x] `post-receive` hook stub (trigger point for CI, no-op for now)
+> `git clone ssh://user@localhost:2222/owner/repo.git` and push/fetch work through the SSH server.
+
+- [x] Bare repos stored at `data/repos/<owner>/<name>.git`.
+- [x] Owner/admin push auto-creates bare repos and DB rows.
+- [x] SSH channel data is streamed to `git upload-pack` / `git receive-pack`.
 
 ---
 
 ## Milestone 3 — Auth & Multi-user ✅
-> Only keys in the DB can push; unknown keys get read-only on public repos.
 
-- [x] SQLite store (`store/store.go`): open, migrate
-- [x] Schema: `users`, `ssh_keys`, `repos`, `repo_perms`
-- [x] Bootstrap: first admin key from `--admin-key` flag (with optional `--admin-user`, default "admin")
-- [x] `auth/auth.go`: fingerprint → user lookup, wire into wish public key handler
-- [x] Access hook: owner/write → push allowed; public repo → fetch allowed; else deny
-- [x] `--set-public owner/name` / `--set-private owner/name` flags to toggle repo visibility
+> Only authorized keys can push; anonymous/unknown keys can read public repos only.
 
----
-
-## Milestone 4 — TUI
-> Bare `ssh -p 2222 user@localhost` opens an interactive terminal UI.
-
-- [x] `wish/bubbletea` middleware; dispatch: PTY → TUI, command → passthrough
-- [x] View: repo list (own + public)
-- [x] View: file browser (tree + blob via `go-git` read-only)
-- [x] View: commit log
-- [x] View: SSH key management (list, add, remove own keys)
-- [x] View: repo management (create, delete, toggle public/private)
+- [x] SHA-256 OpenSSH fingerprint lookup in SQLite.
+- [x] Admin and namespace owner get read-write access.
+- [x] Explicit `repo_perms.write` grants get read-write access.
+- [x] Public repos allow read-only access.
+- [x] Hardened `owner/name(.git)` path parser rejects traversal and ambiguous paths.
 
 ---
 
-## Milestone 5 — CI ✅
-> Push to a repo with `.ci/push` → job runs in a container → status visible in TUI.
+## Milestone 4 — Tickets (myque) ✅
 
-- [x] Schema: `ci_runs` (id, repo_id, sha, ref, status, queued/started/finished timestamps)
-- [x] `ci/queue.go`: SQLite-backed queue, channel notify, recover stale runs on restart
-- [x] `ci/runner.go`: `Runner` interface; `ShellRunner` shells out to `podman`/`docker`/`nerdctl`
-  - Reads `.ci/image` (default: `alpine:latest`)
-  - Extracts working tree via `git archive | tar` into a temp dir, mounts at `/work`
-  - Streams stdout/stderr → `data/logs/<run-id>.log`
-- [x] Wire `post-receive` hook → `queue.Enqueue` (only when `.ci/push` exists at HEAD)
-- [x] TUI view: CI run list per repo, log viewer (tail)
-- [x] SSH subcommand: `ssh host logs <owner>/<repo> [run-id]`
+> `ssh host issues ...` manages server-side tickets for a repository.
+
+- [x] `issues list owner/repo [--status S]`.
+- [x] `issues show owner/repo <id>`.
+- [x] `issues new owner/repo --title "..." [--label L] [--status S] [--agent A]`.
+- [x] `issues move owner/repo <id> <status>`.
+- [x] `issues board owner/repo`.
 
 ---
 
-## Milestone 6 — Issues (git-bug) ✅
-> Issues are stored inside the repo's git objects; visible and manageable from the TUI.
+## Deferred / not yet ported
 
-- [x] Shell out to `git-bug` binary for read (list, show)
-- [x] TUI view: issue list, issue detail
-- [x] TUI action: create issue, add comment, close
-
----
-
-## Milestone 7 — Polish
-> Ready for daily use.
-
-- [ ] TOML config file (`kohiro.toml`) for addr, data dir, container runtime
-- [ ] SSH subcommand: `ssh host status` — server info, uptime, repo count
-- [ ] Admin TUI pane: manage users, revoke keys, delete repos
-- [ ] Graceful shutdown: drain CI queue, close SSH sessions
-- [ ] Single static binary, documented `flake.nix` NixOS module (optional)
+- [ ] Interactive TUI over SSH: repo list, file browser, commit log, SSH key management, repo management.
+- [ ] Container CI runner: `.ci/push`, queued runs, logs, TUI/SSH log views.
+- [ ] TOML config file (`kohiro.toml`) for listen addr and data dir.
+- [ ] SSH subcommand: `ssh host status` — server info, uptime, repo count.
+- [ ] Admin UI or subcommands for managing users, keys, and repos.
+- [ ] Graceful shutdown draining active git sessions.
+- [ ] NixOS module / static binary packaging.

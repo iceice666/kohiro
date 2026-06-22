@@ -1,4 +1,3 @@
 data/
-.gopath/
-/kohiro
+/target
 /.direnv

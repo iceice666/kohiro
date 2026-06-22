@@ -1,5 +1,5 @@
 {
-  description = "kohiro - tiny git server with SSH TUI and CI";
+  description = "kohiro - Rust SSH git server with myque tickets";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,19 +14,19 @@
       {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
-            go
-            gopls
-            gotools      # goimports, etc.
+            cargo
+            rustc
+            rustfmt
+            clippy
+            rust-analyzer
             git
-            git-bug
             just
-            sqlite       # debug queries against kohiro.db
+            sqlite
+            pkg-config
+            cmake
+            clang
+            gcc
           ];
-
-          shellHook = ''
-            export GOPATH="$PWD/.gopath"
-            export PATH="$GOPATH/bin:$PATH"
-          '';
         };
       }
     );

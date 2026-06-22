@@ -1,0 +1,21 @@
+[package]
+name = "kohiro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+russh = "0.48"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "process", "sync", "time"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+shlex = "1"
+rand = "0.8"
+log = "0.4"
+env_logger = "0.11"
+async-trait = "0.1"
+myque = { path = "../myque" }
+
+[dev-dependencies]
+tempfile = "3"
