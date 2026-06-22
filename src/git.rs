@@ -227,3 +227,55 @@ pub async fn read_blob(dir: &Path, path: &str) -> anyhow::Result<BlobView> {
         })
     }
 }
+
+/// HEAD commit sha of the bare repo, or None if HEAD does not resolve (empty repo).
+pub async fn resolve_head(bare: &Path) -> anyhow::Result<Option<String>> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .await
+        .with_context(|| format!("git rev-parse HEAD in {}", bare.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
+}
+
+/// True if `path` exists in the tree at HEAD.
+pub async fn path_exists_at_head(bare: &Path, path: &str) -> bool {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("HEAD:{path}"))
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Clone the bare repo's HEAD worktree into `dest` (creates a normal checkout).
+pub async fn checkout_head(bare: &Path, dest: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let out = tokio::process::Command::new("git")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(bare)
+        .arg(dest)
+        .output()
+        .await
+        .with_context(|| format!("git clone {} -> {}", bare.display(), dest.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git clone failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}

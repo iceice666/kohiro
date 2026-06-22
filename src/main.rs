@@ -57,6 +57,22 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let ci_db = Arc::new(chilin::Db::open(&paths.chilin_ci_db_path()).context("open ci db")?);
+    ci_db.migrate()?;
+    let agent_db =
+        Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).context("open agent db")?);
+    agent_db.migrate()?;
+    tokio::spawn(chilin::run_worker(
+        ci_db.clone(),
+        build_runner(&env_image("KOHIRO_CI_IMAGE")),
+        Duration::from_secs(2),
+    ));
+    tokio::spawn(chilin::run_worker(
+        agent_db.clone(),
+        build_runner(&env_image("KOHIRO_AGENT_IMAGE")),
+        Duration::from_secs(2),
+    ));
+
     let host_key = load_or_create_host_key(&paths.host_key_path()).context("load host key")?;
     let config = russh::server::Config {
         keys: vec![host_key],
@@ -65,11 +81,37 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let mut srv = KohiroServer { store, paths };
+    let mut srv = KohiroServer {
+        store,
+        paths,
+        ci_db,
+        agent_db,
+    };
     log::info!("kohiro listening on 0.0.0.0:2222");
     srv.run_on_address(Arc::new(config), ("0.0.0.0", 2222))
         .await?;
     Ok(())
+}
+
+fn env_image(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| "alpine:3.19".into())
+}
+
+fn build_runner(image: &str) -> Arc<dyn chilin::Runner> {
+    let runtime = std::env::var("KOHIRO_CI_RUNTIME").unwrap_or_else(|_| "docker".into());
+    if runtime == "shell" {
+        return Arc::new(chilin::ShellRunner);
+    }
+    let extra_args = std::env::var("KOHIRO_CI_EXTRA_ARGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    Arc::new(chilin::ContainerRunner {
+        runtime,
+        image: image.to_owned(),
+        extra_args,
+    })
 }
 
 fn bootstrap_admin(store: &Store, username: &str, key_file: &Path) -> anyhow::Result<()> {

@@ -17,13 +17,20 @@ use tokio::process::ChildStdin;
 pub struct KohiroServer {
     pub store: Arc<Store>,
     pub paths: Arc<Paths>,
+    pub ci_db: Arc<chilin::Db>,
+    pub agent_db: Arc<chilin::Db>,
 }
 
 impl server::Server for KohiroServer {
     type Handler = Conn;
 
     fn new_client(&mut self, _peer: Option<SocketAddr>) -> Conn {
-        Conn::new(self.store.clone(), self.paths.clone())
+        Conn::new(
+            self.store.clone(),
+            self.paths.clone(),
+            self.ci_db.clone(),
+            self.agent_db.clone(),
+        )
     }
 
     fn handle_session_error(&mut self, error: <Self::Handler as server::Handler>::Error) {
@@ -34,6 +41,8 @@ impl server::Server for KohiroServer {
 pub struct Conn {
     store: Arc<Store>,
     paths: Arc<Paths>,
+    ci_db: Arc<chilin::Db>,
+    agent_db: Arc<chilin::Db>,
     fp: Option<String>,
     git_stdin: HashMap<ChannelId, ChildStdin>,
     pty: Option<(u16, u16)>,
@@ -41,10 +50,17 @@ pub struct Conn {
 }
 
 impl Conn {
-    fn new(store: Arc<Store>, paths: Arc<Paths>) -> Self {
+    fn new(
+        store: Arc<Store>,
+        paths: Arc<Paths>,
+        ci_db: Arc<chilin::Db>,
+        agent_db: Arc<chilin::Db>,
+    ) -> Self {
         Self {
             store,
             paths,
+            ci_db,
+            agent_db,
             fp: None,
             git_stdin: HashMap::new(),
             pty: None,
@@ -170,6 +186,12 @@ impl Conn {
         self.git_stdin.insert(channel, stdin);
 
         let handle = session.handle();
+        let ci_db = self.ci_db.clone();
+        let paths = self.paths.clone();
+        let owner_c = owner.clone();
+        let name_c = name.clone();
+        let repo_path_c = repo_path.clone();
+        let pusher = user.as_ref().map(|u| u.username.clone());
         tokio::spawn(async move {
             let stdout_task = tokio::spawn(pipe_reader(stdout, handle.clone(), channel, false));
             let stderr_task = tokio::spawn(pipe_reader(stderr, handle.clone(), channel, true));
@@ -177,6 +199,20 @@ impl Conn {
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             let code = status.ok().and_then(|status| status.code()).unwrap_or(1) as u32;
+            if service == "receive-pack"
+                && code == 0
+                && let Err(e) = crate::ci::enqueue_push(
+                    &ci_db,
+                    &paths,
+                    &owner_c,
+                    &name_c,
+                    &repo_path_c,
+                    pusher.as_deref(),
+                )
+                .await
+            {
+                log::warn!("CI enqueue for {owner_c}/{name_c} failed: {e:#}");
+            }
             let _ = handle.exit_status_request(channel, code).await;
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
@@ -192,13 +228,75 @@ impl Conn {
         session: &mut Session,
     ) -> Result<(), anyhow::Error> {
         let user = self.current_user();
-        let (out, code) = tickets::run_issues(&self.store, &self.paths, user.as_ref(), argv);
+        let (out, code) = tickets::run_issues(
+            &self.store,
+            &self.paths,
+            &self.agent_db,
+            user.as_ref(),
+            argv,
+        );
         session.channel_success(channel)?;
         session.data(channel, CryptoVec::from(out))?;
         session.exit_status_request(channel, code as u32)?;
         session.eof(channel)?;
         session.close(channel)?;
         Ok(())
+    }
+
+    fn handle_ci(
+        &mut self,
+        channel: ChannelId,
+        argv: &[String],
+        session: &mut Session,
+    ) -> Result<(), anyhow::Error> {
+        let (out, code) = self.run_ci(argv);
+        session.channel_success(channel)?;
+        session.data(channel, CryptoVec::from(out))?;
+        session.exit_status_request(channel, code as u32)?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
+    fn run_ci(&self, argv: &[String]) -> (String, i32) {
+        let user = self.current_user();
+        let usage = || ("usage: ci <list|show|logs> owner/repo [id]\n".to_owned(), 2);
+        let Some(cmd) = argv.get(1) else {
+            return usage();
+        };
+        let Some(repo) = argv.get(2) else {
+            return usage();
+        };
+        let Some((owner, name)) = auth::parse_repo(repo) else {
+            return ("invalid repository path\n".to_owned(), 1);
+        };
+        if !auth::can_read(&self.store, user.as_ref(), &owner, &name) {
+            return ("access denied\n".to_owned(), 1);
+        }
+        let namespace = format!("{owner}/{name}");
+        match cmd.as_str() {
+            "list" if argv.len() == 3 => match self.ci_db.list(&namespace, 20) {
+                Ok(jobs) => (crate::ci::format_job_table(&jobs), 0),
+                Err(e) => (format!("{e}\n"), 1),
+            },
+            "show" | "logs" if argv.len() == 4 => {
+                let Some(id) = argv.get(3).and_then(|s| s.parse::<i64>().ok()) else {
+                    return usage();
+                };
+                match self.ci_db.get(id) {
+                    Ok(Some(j)) if j.namespace == namespace => {
+                        if cmd == "show" {
+                            (crate::ci::format_job_detail(&j), 0)
+                        } else {
+                            (crate::ci::read_job_log(&j), 0)
+                        }
+                    }
+                    Ok(_) => ("no such run\n".to_owned(), 1),
+                    Err(e) => (format!("{e}\n"), 1),
+                }
+            }
+            _ => usage(),
+        }
     }
 }
 
@@ -275,14 +373,14 @@ impl server::Handler for Conn {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tui) = self.tui.as_mut() {
-            if tui.channel() == channel {
-                let quit = tui.on_input(data).await?;
-                if quit {
-                    self.tui = None;
-                }
-                return Ok(());
+        if let Some(tui) = self.tui.as_mut()
+            && tui.channel() == channel
+        {
+            let quit = tui.on_input(data).await?;
+            if quit {
+                self.tui = None;
             }
+            return Ok(());
         }
         let write_result = if let Some(stdin) = self.git_stdin.get_mut(&channel) {
             Some(stdin.write_all(data).await)
@@ -330,10 +428,10 @@ impl server::Handler for Conn {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.pty = Some((col_width as u16, row_height as u16));
-        if let Some(tui) = self.tui.as_mut() {
-            if tui.channel() == channel {
-                tui.on_resize(col_width as u16, row_height as u16).await?;
-            }
+        if let Some(tui) = self.tui.as_mut()
+            && tui.channel() == channel
+        {
+            tui.on_resize(col_width as u16, row_height as u16).await?;
         }
         Ok(())
     }
@@ -357,6 +455,10 @@ impl server::Handler for Conn {
 
         if argv[0] == "issues" {
             return self.handle_issues(channel, &argv, session);
+        }
+
+        if argv[0] == "ci" {
+            return self.handle_ci(channel, &argv, session);
         }
 
         session.channel_success(channel)?;

@@ -1,8 +1,11 @@
+use crate::agent_backend::ContainerBackend;
 use crate::auth;
+use crate::ci;
 use crate::paths::Paths;
 use crate::store::{Store, User};
 use clap::{Parser, Subcommand};
 use myque::{CreateTaskInput, Status, StoreError as MyqueStoreError, StoredTask, TaskStore};
+use std::sync::Arc;
 
 fn task_store(paths: &Paths, owner: &str, name: &str) -> TaskStore {
     TaskStore::new(paths.myque_root(owner, name))
@@ -95,6 +98,16 @@ enum IssuesCmd {
     Board {
         repo: String,
     },
+    Dispatch {
+        repo: String,
+    },
+    Runs {
+        repo: String,
+    },
+    Logs {
+        repo: String,
+        id: i64,
+    },
 }
 
 impl IssuesCmd {
@@ -104,7 +117,10 @@ impl IssuesCmd {
             | Self::Show { repo, .. }
             | Self::New { repo, .. }
             | Self::Move { repo, .. }
-            | Self::Board { repo } => repo,
+            | Self::Board { repo }
+            | Self::Dispatch { repo }
+            | Self::Runs { repo }
+            | Self::Logs { repo, .. } => repo,
         }
     }
 }
@@ -112,6 +128,7 @@ impl IssuesCmd {
 pub fn run_issues(
     store: &Store,
     paths: &Paths,
+    agent_db: &Arc<chilin::Db>,
     user: Option<&User>,
     argv: &[String],
 ) -> (String, i32) {
@@ -189,6 +206,65 @@ pub fn run_issues(
                     0,
                 ),
                 Err(err) => store_error(err),
+            }
+        }
+        IssuesCmd::Dispatch { .. } => {
+            if !auth::can_write(store, user, &owner, &name) {
+                return ("access denied\n".to_owned(), 1);
+            }
+            let ticket_store = task_store(paths, &owner, &name);
+            let config = match ticket_store.load_config() {
+                Ok(config) => config,
+                Err(err) => return store_error(err),
+            };
+            let mut reg = myque::BackendRegistry::with_builtins();
+            reg.register(Box::new(ContainerBackend {
+                agent_db: agent_db.clone(),
+                paths: paths.clone(),
+                owner: owner.clone(),
+                name: name.clone(),
+            }));
+            let outcome = match myque::dispatch_with(&ticket_store, &config, false, &reg) {
+                Ok(outcome) => outcome,
+                Err(err) => return (format!("{err}\n"), 1),
+            };
+            let mut out = String::new();
+            for r in outcome.started {
+                out.push_str(&format!(
+                    "started {} run={} backend={}\n",
+                    r.task_id, r.id, r.backend
+                ));
+            }
+            for (task_id, reason) in outcome.rejected {
+                out.push_str(&format!(
+                    "skipped {}: {}\n",
+                    task_id,
+                    myque::skip_reason_text(&reason)
+                ));
+            }
+            if out.is_empty() {
+                out.push_str("nothing dispatched\n");
+            }
+            (out, 0)
+        }
+        IssuesCmd::Runs { .. } => {
+            if !auth::can_read(store, user, &owner, &name) {
+                return ("access denied\n".to_owned(), 1);
+            }
+            match agent_db.list(&format!("{owner}/{name}"), 20) {
+                Ok(jobs) => (ci::format_job_table(&jobs), 0),
+                Err(err) => (format!("{err}\n"), 1),
+            }
+        }
+        IssuesCmd::Logs { id, .. } => {
+            if !auth::can_read(store, user, &owner, &name) {
+                return ("access denied\n".to_owned(), 1);
+            }
+            let namespace = format!("{owner}/{name}");
+            match agent_db.get(id) {
+                Ok(Some(j)) if j.namespace == namespace => (ci::read_job_log(&j), 0),
+                Ok(_) => ("no such run\n".to_owned(), 1),
+                Err(err) => (format!("{err}\n"), 1),
             }
         }
         IssuesCmd::New {

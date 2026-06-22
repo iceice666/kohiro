@@ -1,6 +1,7 @@
 use kohiro::paths::Paths;
 use kohiro::store::Store;
 use kohiro::tickets::run_issues;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn argv(args: &[&str]) -> Vec<String> {
@@ -12,6 +13,9 @@ fn issues_commands_manage_myque_tasks() {
     let dir = tempdir().unwrap();
     let paths = Paths::new(dir.path().join("data"));
     let store = Store::open(&paths.db_path()).unwrap();
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    let agent_db = Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).unwrap());
+    agent_db.migrate().unwrap();
     let owner = store.add_user("o", false).unwrap();
     store.ensure_repo(owner.id, "r").unwrap();
     let outsider = store.add_user("x", false).unwrap();
@@ -19,6 +23,7 @@ fn issues_commands_manage_myque_tasks() {
     let (out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&owner),
         &argv(&["issues", "new", "o/r", "--title", "hello"]),
     );
@@ -39,6 +44,7 @@ fn issues_commands_manage_myque_tasks() {
     let (out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&owner),
         &argv(&["issues", "list", "o/r"]),
     );
@@ -48,6 +54,7 @@ fn issues_commands_manage_myque_tasks() {
     let (out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&owner),
         &argv(&["issues", "move", "o/r", &id, "ready"]),
     );
@@ -57,6 +64,7 @@ fn issues_commands_manage_myque_tasks() {
     let (out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&owner),
         &argv(&["issues", "show", "o/r", &id]),
     );
@@ -66,6 +74,7 @@ fn issues_commands_manage_myque_tasks() {
     let (_out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&owner),
         &argv(&["issues", "move", "o/r", &id, "bogus"]),
     );
@@ -74,6 +83,7 @@ fn issues_commands_manage_myque_tasks() {
     let (out, code) = run_issues(
         &store,
         &paths,
+        &agent_db,
         Some(&outsider),
         &argv(&["issues", "list", "o/r"]),
     );
@@ -93,9 +103,11 @@ fn typed_helpers_create_and_update_tasks() {
     let id = created.task.id.clone();
 
     let tasks = list_tasks(&paths, "o", "r").unwrap();
-    assert!(tasks
-        .iter()
-        .any(|t| t.task.id == id && t.task.title == "from tui"));
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.task.id == id && t.task.title == "from tui")
+    );
 
     set_status(&paths, "o", "r", &id, Status::Ready).unwrap();
     let fetched = get_task(&paths, "o", "r", &id).unwrap();

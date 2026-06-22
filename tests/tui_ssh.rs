@@ -17,7 +17,7 @@ use kohiro::server::KohiroServer;
 use kohiro::store::Store;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::Server as _;
-use russh::{client, Channel, ChannelMsg};
+use russh::{Channel, ChannelMsg, client};
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 
@@ -83,6 +83,10 @@ async fn pty_shell_drives_tui_over_ssh() {
     let paths = Arc::new(Paths::new(dir.path().join("data")));
     std::fs::create_dir_all(paths.repos_dir()).unwrap();
     let store = Arc::new(Store::open(&paths.db_path()).unwrap());
+    let ci_db = Arc::new(chilin::Db::open(&paths.chilin_ci_db_path()).unwrap());
+    ci_db.migrate().unwrap();
+    let agent_db = Arc::new(chilin::Db::open(&paths.chilin_agent_db_path()).unwrap());
+    agent_db.migrate().unwrap();
 
     let client_key = PrivateKey::random(&mut rand::rngs::OsRng, Algorithm::Ed25519).unwrap();
     let fp = auth::fingerprint_of(client_key.public_key());
@@ -119,6 +123,8 @@ async fn pty_shell_drives_tui_over_ssh() {
     let mut srv = KohiroServer {
         store: store.clone(),
         paths: paths.clone(),
+        ci_db,
+        agent_db,
     };
     let server_task = tokio::spawn(async move {
         let _ = srv.run_on_socket(server_config, &listener).await;

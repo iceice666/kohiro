@@ -1,4 +1,6 @@
+pub mod agent_backend;
 pub mod auth;
+pub mod ci;
 pub mod git;
 pub mod paths;
 pub mod server;
