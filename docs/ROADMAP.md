@@ -63,9 +63,21 @@ Each milestone is independently verifiable before moving on.
 
 ---
 
+## Milestone 5 — Interactive TUI over SSH ✅
+
+> `ssh -t -p 2222 user@localhost` opens a full-screen ratatui TUI rendered over the channel.
+
+- [x] Repos tab: list accessible repos, create (`n`), delete (`d`/`x`), toggle public (`p`).
+- [x] Keys tab: list / add (`a`) / remove (`d`/`x`) the signed-in user's SSH keys.
+- [x] Repo detail view: Files browser + blob viewer, commit log, and myque-backed Issues (`n` new, `m` set status).
+- [x] Rendered inline in the russh handler (`src/tui/`); non-PTY sessions print a hint.
+
+> Deferred: TUI issue body editing (creation is title + status only, parity with `issues new`) and a CI sub-tab (the CI runner remains deferred).
+
+---
+
 ## Deferred / not yet ported
 
-- [ ] Interactive TUI over SSH: repo list, file browser, commit log, SSH key management, repo management.
 - [ ] Container CI runner: `.ci/push`, queued runs, logs, TUI/SSH log views.
 - [ ] TOML config file (`kohiro.toml`) for listen addr and data dir.
 - [ ] SSH subcommand: `ssh host status` — server info, uptime, repo count.

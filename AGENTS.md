@@ -59,7 +59,7 @@ Kohiro uses `russh` directly. Each connection gets a `Conn` handler:
 - `exec_request` dispatches `git-upload-pack` / `git upload-pack`, `git-receive-pack` / `git receive-pack`, and `issues ...`;
 - git commands spawn the system `git` binary against bare repos under `data/repos/<owner>/<name>.git` and stream SSH channel data to/from the child process;
 - `issues` commands call the myque-backed ticket dispatcher synchronously and return command output over SSH;
-- PTY/shell sessions return a one-line TUI-deferred hint.
+- PTY shell sessions (`ssh -t`) launch the ratatui TUI (`src/tui/`) rendered inline over the channel; non-PTY sessions return a one-line hint.
 
 `auth::git_access`, `auth::can_read`, and `auth::can_write` enforce access: admin/owner/explicit-grant → read-write; public repo → read-only; else no access.
 
@@ -70,9 +70,10 @@ Bare repos live at `data/repos/<owner>/<name>.git`. Host keys are stored in `dat
 ### Packages
 
 - `src/main.rs` — CLI flags, admin bootstrap, host key management, server startup.
-- `src/server.rs` — `russh` server and SSH exec/channel handling.
+- `src/server.rs` — `russh` server, SSH exec/channel handling, and PTY-shell TUI wiring.
 - `src/store.rs` — SQLite users, SSH keys, repos, and repo permissions.
 - `src/auth.rs` — key fingerprint lookup, repo path parsing, access decisions.
-- `src/git.rs` — bare repo creation and git service command construction.
+- `src/git.rs` — bare repo create/delete, git service commands, and the `git`-backed read layer (commit log, tree, blob).
 - `src/tickets.rs` — `issues` CLI parser and myque integration.
 - `src/paths.rs` — centralized data path policy.
+- `src/tui/` — ratatui TUI over SSH: Repos and Keys tabs, plus a repo detail view (Files browser + blob viewer, Commit log, myque-backed Issues). CI sub-tab and TUI issue body editing remain deferred.
