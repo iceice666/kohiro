@@ -2,7 +2,7 @@ use crate::auth;
 use crate::paths::Paths;
 use crate::store::{Store, User};
 use clap::{Parser, Subcommand};
-use myque::{CreateTaskInput, Status, StoreError as MyqueStoreError, TaskStore};
+use myque::{CreateTaskInput, Status, StoreError as MyqueStoreError, StoredTask, TaskStore};
 
 fn task_store(paths: &Paths, owner: &str, name: &str) -> TaskStore {
     TaskStore::new(paths.myque_root(owner, name))
@@ -13,6 +13,49 @@ fn ensure_initialized(store: &TaskStore) -> Result<(), MyqueStoreError> {
         store.init(false)?;
     }
     Ok(())
+}
+
+pub fn list_tasks(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+) -> Result<Vec<StoredTask>, MyqueStoreError> {
+    task_store(paths, owner, name).load_tasks()
+}
+
+pub fn get_task(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+    id: &str,
+) -> Result<StoredTask, MyqueStoreError> {
+    task_store(paths, owner, name).get_task(id)
+}
+
+pub fn create_titled(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+    title: String,
+    status: Status,
+) -> Result<StoredTask, MyqueStoreError> {
+    let store = task_store(paths, owner, name);
+    ensure_initialized(&store)?;
+    let mut input = CreateTaskInput::new(title);
+    input.status = status;
+    store.create_task(input)
+}
+
+pub fn set_status(
+    paths: &Paths,
+    owner: &str,
+    name: &str,
+    id: &str,
+    status: Status,
+) -> Result<StoredTask, MyqueStoreError> {
+    let store = task_store(paths, owner, name);
+    ensure_initialized(&store)?;
+    store.update_status(id, status)
 }
 
 #[derive(Parser)]

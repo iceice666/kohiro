@@ -80,3 +80,24 @@ fn issues_commands_manage_myque_tasks() {
     assert_eq!(code, 1);
     assert_eq!(out, "access denied\n");
 }
+
+#[test]
+fn typed_helpers_create_and_update_tasks() {
+    use kohiro::tickets::{create_titled, get_task, list_tasks, set_status};
+    use myque::Status;
+
+    let dir = tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("data"));
+
+    let created = create_titled(&paths, "o", "r", "from tui".into(), Status::Backlog).unwrap();
+    let id = created.task.id.clone();
+
+    let tasks = list_tasks(&paths, "o", "r").unwrap();
+    assert!(tasks
+        .iter()
+        .any(|t| t.task.id == id && t.task.title == "from tui"));
+
+    set_status(&paths, "o", "r", &id, Status::Ready).unwrap();
+    let fetched = get_task(&paths, "o", "r", &id).unwrap();
+    assert_eq!(fetched.task.status, Status::Ready);
+}

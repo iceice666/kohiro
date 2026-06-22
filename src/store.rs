@@ -21,10 +21,30 @@ pub struct Repo {
     pub public: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RepoListing {
+    pub id: i64,
+    pub owner_id: i64,
+    pub name: String,
+    pub public: bool,
+    pub owner_username: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SshKey {
+    pub id: i64,
+    pub fingerprint: String,
+    pub comment: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("not found")]
     NotFound,
+    #[error("key already registered to another user")]
+    KeyClaimedByOther,
+    #[error("cannot remove the last key")]
+    LastKey,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -248,4 +268,145 @@ impl Store {
         }
         Ok(())
     }
+
+    pub fn list_repos_for_user(&self, user_id: i64) -> StoreResult<Vec<RepoListing>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT r.id, r.owner_id, r.name, r.public, u.username
+            FROM repos r
+            JOIN users u ON u.id = r.owner_id
+            WHERE r.public = 1
+               OR r.owner_id = ?
+               OR EXISTS (SELECT 1 FROM repo_perms p WHERE p.repo_id = r.id AND p.user_id = ?)
+               OR (SELECT is_admin FROM users WHERE id = ?) = 1
+            ORDER BY u.username, r.name
+            "#,
+        )?;
+        let rows = stmt.query_map(params![user_id, user_id, user_id], map_repo_listing)?;
+        let mut listings = Vec::new();
+        for row in rows {
+            listings.push(row?);
+        }
+        Ok(listings)
+    }
+
+    pub fn list_public_repos(&self) -> StoreResult<Vec<RepoListing>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT r.id, r.owner_id, r.name, r.public, u.username
+            FROM repos r
+            JOIN users u ON u.id = r.owner_id
+            WHERE r.public = 1
+            ORDER BY u.username, r.name
+            "#,
+        )?;
+        let rows = stmt.query_map([], map_repo_listing)?;
+        let mut listings = Vec::new();
+        for row in rows {
+            listings.push(row?);
+        }
+        Ok(listings)
+    }
+
+    pub fn list_keys_for_user(&self, user_id: i64) -> StoreResult<Vec<SshKey>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, fingerprint, comment FROM ssh_keys WHERE user_id = ? ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(SshKey {
+                id: row.get(0)?,
+                fingerprint: row.get(1)?,
+                comment: row.get(2)?,
+            })
+        })?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row?);
+        }
+        Ok(keys)
+    }
+
+    pub fn add_key_strict(
+        &self,
+        user_id: i64,
+        fingerprint: &str,
+        comment: &str,
+    ) -> StoreResult<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let existing: rusqlite::Result<i64> = conn.query_row(
+            "SELECT user_id FROM ssh_keys WHERE fingerprint = ?",
+            params![fingerprint],
+            |row| row.get(0),
+        );
+        match existing {
+            Ok(existing_user) if existing_user == user_id => Ok(true),
+            Ok(_) => Err(StoreError::KeyClaimedByOther),
+            Err(SqliteError::QueryReturnedNoRows) => {
+                conn.execute(
+                    "INSERT INTO ssh_keys(user_id, fingerprint, comment) VALUES (?, ?, ?)",
+                    params![user_id, fingerprint, comment],
+                )?;
+                Ok(false)
+            }
+            Err(err) => Err(StoreError::Sqlite(err)),
+        }
+    }
+
+    pub fn key_count(&self, user_id: i64) -> StoreResult<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ssh_keys WHERE user_id = ?",
+            params![user_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn remove_key(&self, user_id: i64, key_id: i64) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let affected = conn.execute(
+            "DELETE FROM ssh_keys WHERE id = ? AND user_id = ?",
+            params![key_id, user_id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn delete_repo(&self, owner_username: &str, name: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let repo_id: i64 = match tx.query_row(
+            r#"
+            SELECT r.id FROM repos r
+            JOIN users u ON u.id = r.owner_id
+            WHERE u.username = ? AND r.name = ?
+            "#,
+            params![owner_username, name],
+            |row| row.get(0),
+        ) {
+            Ok(id) => id,
+            Err(SqliteError::QueryReturnedNoRows) => return Err(StoreError::NotFound),
+            Err(err) => return Err(StoreError::Sqlite(err)),
+        };
+        tx.execute("DELETE FROM repo_perms WHERE repo_id = ?", params![repo_id])?;
+        tx.execute("DELETE FROM repos WHERE id = ?", params![repo_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn map_repo_listing(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoListing> {
+    let public: i64 = row.get(3)?;
+    Ok(RepoListing {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        public: public != 0,
+        owner_username: row.get(4)?,
+    })
 }

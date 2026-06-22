@@ -84,3 +84,7 @@ pub fn can_write(store: &Store, user: Option<&User>, owner: &str, name: &str) ->
     };
     store.has_write_access(user.id, repo.id)
 }
+
+pub fn can_write_in_namespace(user: Option<&User>, owner: &str) -> bool {
+    user.is_some_and(|u| u.is_admin || u.username == owner)
+}

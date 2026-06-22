@@ -36,6 +36,8 @@ pub struct Conn {
     paths: Arc<Paths>,
     fp: Option<String>,
     git_stdin: HashMap<ChannelId, ChildStdin>,
+    pty: Option<(u16, u16)>,
+    tui: Option<crate::tui::Tui>,
 }
 
 impl Conn {
@@ -45,6 +47,8 @@ impl Conn {
             paths,
             fp: None,
             git_stdin: HashMap::new(),
+            pty: None,
+            tui: None,
         }
     }
 
@@ -223,13 +227,14 @@ impl server::Handler for Conn {
         &mut self,
         channel: ChannelId,
         _term: &str,
-        _col_width: u32,
-        _row_height: u32,
+        col_width: u32,
+        row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.pty = Some((col_width as u16, row_height as u16));
         session.channel_success(channel)?;
         Ok(())
     }
@@ -240,13 +245,28 @@ impl server::Handler for Conn {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        finish_with(
-            session,
-            channel,
-            0,
-            "kohiro: interactive TUI is not available yet. Use git over SSH, or `ssh <host> issues …`.\n",
-            "",
-        )
+        if let Some((cols, rows)) = self.pty {
+            let tui = crate::tui::Tui::start(
+                session.handle(),
+                channel,
+                self.store.clone(),
+                self.paths.clone(),
+                self.current_user(),
+                cols,
+                rows,
+            )
+            .await?;
+            self.tui = Some(tui);
+            Ok(())
+        } else {
+            finish_with(
+                session,
+                channel,
+                0,
+                "kohiro: interactive TUI requires a PTY (use `ssh -t`). For git use `git clone`.\n",
+                "",
+            )
+        }
     }
 
     async fn data(
@@ -255,6 +275,15 @@ impl server::Handler for Conn {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if let Some(tui) = self.tui.as_mut() {
+            if tui.channel() == channel {
+                let quit = tui.on_input(data).await?;
+                if quit {
+                    self.tui = None;
+                }
+                return Ok(());
+            }
+        }
         let write_result = if let Some(stdin) = self.git_stdin.get_mut(&channel) {
             Some(stdin.write_all(data).await)
         } else {
@@ -273,6 +302,9 @@ impl server::Handler for Conn {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.git_stdin.remove(&channel);
+        if self.tui.as_ref().is_some_and(|t| t.channel() == channel) {
+            self.tui = None;
+        }
         Ok(())
     }
 
@@ -282,6 +314,27 @@ impl server::Handler for Conn {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.git_stdin.remove(&channel);
+        if self.tui.as_ref().is_some_and(|t| t.channel() == channel) {
+            self.tui = None;
+        }
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.pty = Some((col_width as u16, row_height as u16));
+        if let Some(tui) = self.tui.as_mut() {
+            if tui.channel() == channel {
+                tui.on_resize(col_width as u16, row_height as u16).await?;
+            }
+        }
         Ok(())
     }
 
