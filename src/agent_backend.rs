@@ -91,10 +91,8 @@ impl AgentBackend for ContainerBackend {
 
         let log_dir = self.paths.agent_log_dir(&self.owner, &self.name);
         let body = format!(
-            "{}\n\n## Chilin\n\n```toml\n{}\n```\n",
-            task.body.trim_end(),
-            chilin_block(
-                &command,
+            "{}\n\n{}\n\n## Run agent\n\n```sh\n{}\n```\n",
+            chilin_metadata(
                 &[
                     ("MYQUE_TASK_ID".to_owned(), task.task.id.clone()),
                     (
@@ -108,7 +106,9 @@ impl AgentBackend for ContainerBackend {
                     readonly: false,
                 },
                 log_dir.join(format!("{run_id}.log"))
-            )
+            ),
+            task.body.trim_end(),
+            shell_join(&command),
         );
         let mut dispatched = task.clone();
         dispatched.body = body;
@@ -129,45 +129,44 @@ impl AgentBackend for ContainerBackend {
     }
 }
 
-fn chilin_block(
-    command: &[String],
+fn chilin_metadata(
     env: &[(String, String)],
     mount: &chilin::Mount,
     log_path: std::path::PathBuf,
 ) -> String {
+    let mut lines = vec![
+        metadata_string("log_path", &log_path.display().to_string()),
+        metadata_string("mount.source", &mount.source.display().to_string()),
+        metadata_string("mount.target", &mount.target),
+        format!("> mount.readonly = {}", mount.readonly),
+    ];
+    lines.extend(
+        env.iter()
+            .map(|(key, value)| metadata_string(&format!("env.{key}"), value)),
+    );
+    lines.join("\n")
+}
+
+fn metadata_string(key: &str, value: &str) -> String {
     format!(
-        "command = {}\nenv = {}\nlog_path = {}\n\n[mount]\nsource = {}\ntarget = {}\nreadonly = {}",
-        toml_string_array(command),
-        toml_pairs(env),
-        toml_string(&log_path.display().to_string()),
-        toml_string(&mount.source.display().to_string()),
-        toml_string(&mount.target),
-        mount.readonly
+        "> {key} = \"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
     )
 }
 
-fn toml_string_array(values: &[String]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|value| toml_string(value))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn toml_pairs(values: &[(String, String)]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|(key, value)| format!("[{}, {}]", toml_string(key), toml_string(value)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-fn toml_string(value: &str) -> String {
-    toml::Value::String(value.to_owned()).to_string()
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

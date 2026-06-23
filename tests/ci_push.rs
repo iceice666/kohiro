@@ -52,6 +52,14 @@ depends_on = []
 max_attempts = 2
 +++
 
+> log_path = "{log_path}"
+> mount.source = "{workdir}"
+> mount.target = "/repo"
+> mount.readonly = false
+> env.CI_REPO = "{repo}"
+> env.CI_SHA = "{sha}"
+> env.CI_PUSHER = "{pusher}"
+
 ## Goal
 
 Run push CI for {repo}.
@@ -62,23 +70,16 @@ Commit {sha} was pushed by {pusher}.
 
 ## Constraints
 
-Run in the checked out pushed commit.
+Run in the checked-out pushed commit.
 
 ## Acceptance
 
-The configured command exits successfully.
+The command exits successfully.
 
-## Chilin
+## Test
 
-```toml
-command = ["sh", "-c", "echo ci-marker-$CI_SHA > ci.out"]
-env = [["CI_REPO", "{repo}"], ["CI_SHA", "{sha}"], ["CI_PUSHER", "{pusher}"]]
-log_path = "{log_path}"
-
-[mount]
-source = "{workdir}"
-target = "/repo"
-readonly = false
+```sh
+echo ci-marker-$CI_SHA > ci.out
 ```
 "#
     .to_owned()
@@ -109,9 +110,9 @@ fn enqueue_push_creates_and_dispatches_ci_ticket() {
 
     assert_eq!(task.task.status, Status::Ready);
     assert_eq!(task.task.backend, "chilin");
-    assert!(task.body.contains("## Chilin"));
-    assert!(task.body.contains("CI_PUSHER"));
-    assert!(task.body.contains("alice"));
+    assert!(task.body.contains("## Test"));
+    assert!(task.body.contains("> env.CI_PUSHER = \"alice\""));
+    assert!(!task.body.contains("## Chilin"));
 
     let ordinary_store = TaskStore::new(paths.myque_root("o", "r"));
     let mut ordinary = myque::CreateTaskInput::new("ordinary ready task");
@@ -137,7 +138,7 @@ fn enqueue_push_creates_and_dispatches_ci_ticket() {
     let jobs = kohiro::ci::list_jobs(&paths, "o", "r", 20).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, chilin::JobStatus::Succeeded);
-    assert!(kohiro::ci::read_job_log(&jobs[0]).is_empty());
+    assert!(kohiro::ci::read_job_log(&jobs[0]).contains("== Test =="));
     let out = std::fs::read_to_string(
         jobs[0]
             .mount

@@ -99,7 +99,9 @@ async fn pty_shell_drives_tui_over_ssh() {
     input.backend = "chilin".to_owned();
     input.allowed_auto_dispatch = true;
     input.body = Some(format!(
-        r#"## Goal
+        r#"> log_path = "{}"
+
+## Goal
 
 Run push CI.
 
@@ -115,11 +117,10 @@ None.
 
 Done.
 
-## Chilin
+## Test
 
-```toml
-command = ["sh", ".ci/push"]
-log_path = "{}"
+```sh
+sh .ci/push
 ```
 "#,
         log_path.display()

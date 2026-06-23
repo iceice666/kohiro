@@ -19,7 +19,6 @@ ratatui = "0.29"
 myque = { git = "https://github.com/mozufu/myque.git" }
 chilin = { git = "https://github.com/mozufu/chilin.git" }
 chrono = "0.4"
-toml = "1.0"
 
 [dev-dependencies]
 tempfile = "3"
